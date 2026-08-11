@@ -1,0 +1,21 @@
+# Crystal
+tools/*/build/
+tools/*/lib/
+tools/*/.crystal/
+tools/*/bin/
+tools/*/shard.lock
+
+# Swift / Xcode
+ConduitApp/build/
+ConduitApp/*.xcodeproj/
+ConduitApp/*.xcworkspace/
+ConduitApp/DerivedData/
+*.swp
+
+# macOS
+.DS_Store
+
+# Local-only disclosure denylist. Deliberately untracked: it holds the
+# literal strings that must never reach this repository, so committing it
+# would be the leak it exists to prevent. See scripts/check-disclosure.sh.
+denylist.txt
