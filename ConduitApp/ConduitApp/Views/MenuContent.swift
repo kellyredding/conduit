@@ -144,13 +144,18 @@ private struct ProfileRow: View {
         .padding(.vertical, 8)
     }
 
-    // Dashed ring, solid ring, then the bolt itself knocked out of a filled
-    // disc. The connected mark is the only one that carries the bolt, which
-    // ties the live row to the same shape the menu bar is showing at that
-    // moment; the two empty rings differ enough from each other to scan, and
-    // both differ from a filled disc by more than weight.
+    // A dashed empty ring, then the bolt inside a ring, then the bolt inside
+    // a filled disc. The two active marks carry the bolt, so a live or
+    // settling row shows the same shape the menu bar is showing at that
+    // moment and the eye can travel between them; the inactive one carries
+    // nothing, which is the whole of what it has to say.
+    //
+    // The in-flight mark is taken from the icon state rather than named again
+    // here, because it is literally the glyph the bar displays while an
+    // attempt is running, and two places naming it separately is how they
+    // come to disagree.
     private var indicator: String {
-        if profile.isInFlight { return "circle" }
+        if profile.isInFlight { return MenuIconState.connecting.symbolName }
         return profile.isConnected ? "bolt.horizontal.circle.fill" : "circle.dashed"
     }
 
