@@ -7,7 +7,10 @@ struct MenuContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Conduit")
+            // "Conduit VPN" rather than "Conduit": the panel can be opened
+            // from a bar full of unlabelled glyphs, and the heading is the
+            // only place that says what this one is for.
+            Text("Conduit VPN")
                 .font(.headline)
                 .padding(.bottom, 10)
 
