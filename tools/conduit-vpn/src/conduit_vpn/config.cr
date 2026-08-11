@@ -80,7 +80,7 @@ module ConduitVPN
                      "menu closed. Used by the menu bar application, which " \
                      "polls continuously; only the connection listing is " \
                      "re-read at this rate.",
-        default: -> { "5" },
+        default: -> { "2" },
       ),
       Key.new(
         name: "connect-timeout",

@@ -144,9 +144,13 @@ private struct ProfileRow: View {
         .padding(.vertical, 8)
     }
 
+    // A progression in solidity rather than three unrelated marks: scattered
+    // dots for nothing, a broken ring for something forming, a solid disc for
+    // something there. A continuous ring read as a state of its own — too
+    // close to the filled disc to scan past, and too definite for "absent".
     private var indicator: String {
-        if profile.isInFlight { return "circle.dotted" }
-        return profile.isConnected ? "circle.fill" : "circle"
+        if profile.isInFlight { return "circle.dashed" }
+        return profile.isConnected ? "circle.fill" : "circle.dotted"
     }
 
     // Cumulative totals, which is all the client reports. Rates require

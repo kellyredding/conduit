@@ -86,7 +86,7 @@ enum ConduitConfig {
                 the profile listing is far more expensive to no purpose, \
                 since it changes only when a profile is imported or removed.
                 """,
-            defaultValue: { "5" }
+            defaultValue: { "2" }
         ),
         Key(
             name: "connect-timeout",

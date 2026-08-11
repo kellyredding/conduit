@@ -21,11 +21,12 @@ enum MenuIconState: String, CaseIterable, Sendable {
     /// Two things about this set are known rather than accidental.
     ///
     /// **`idle` and `connected` differ only by weight** — a hollow horizontal
-    /// bolt against a filled one — and that is the weakest separation in the
-    /// set, on the most important question it answers. It was chosen anyway,
-    /// for family consistency, over sets that broke the shape to gain a
-    /// stronger contrast. If it proves hard to read in practice the fix is
-    /// this table, not a redesign.
+    /// bolt against a filled one. On paper that is the weakest separation in
+    /// the set, on the most important question it answers, and sets that broke
+    /// the shape to gain contrast were considered and rejected for it. Checked
+    /// at size in a real menu bar afterwards, against real neighbours: the
+    /// pair reads at a glance and the concern did not survive contact. Kept as
+    /// a note because the reasoning would otherwise look like an oversight.
     ///
     /// **`sensitive` and `error` leave the family**, because they have to: the
     /// horizontal variants stop at `.circle`, with no shield and no error
