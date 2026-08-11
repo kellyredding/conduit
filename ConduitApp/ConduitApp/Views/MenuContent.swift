@@ -5,10 +5,6 @@ import SwiftUI
 struct MenuContent: View {
     @ObservedObject var store: VPNStore
 
-    private var anySensitive: Bool {
-        store.profiles.contains(where: \.isSensitive)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Conduit")
@@ -27,21 +23,6 @@ struct MenuContent: View {
                         profile: profile,
                         counters: store.counters[profile.name]
                     )
-                }
-
-                // The mark is meaningless on its own, and a symbol nobody can
-                // decode is worse than no symbol: it reads as a warning about
-                // something unspecified. Same wording the command line uses,
-                // so the two explanations cannot drift apart.
-                if anySensitive {
-                    HStack(spacing: 6) {
-                        Image(systemName: sensitiveSymbol)
-                            .font(.system(size: 12))
-                        Text("needs confirmation to connect")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 8)
                 }
             }
 
@@ -77,9 +58,21 @@ struct MenuContent: View {
 
     private var footer: some View {
         HStack {
-            Button("Refresh") { store.refreshNow() }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+            // A glyph rather than a word: refreshing is the one thing here
+            // that repeats, and the symbol is already understood everywhere
+            // else it appears. The label survives for anyone navigating by
+            // voice or by screen reader, where a bare arrow says nothing.
+            Button {
+                store.refreshNow()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Refresh now")
+            .accessibilityLabel("Refresh")
+
             Spacer()
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.plain)
@@ -90,8 +83,11 @@ struct MenuContent: View {
     }
 }
 
-/// Shared so the legend and the rows cannot fall out of step.
-let sensitiveSymbol = "exclamationmark.shield.fill"
+/// Taken from the icon state rather than written out again. A row marked with
+/// one shield while the bar shows a different one teaches that the two mean
+/// different things, and the only way to guarantee they never diverge is for
+/// there to be a single source for the name.
+private let sensitiveSymbol = MenuIconState.sensitive.symbolName
 
 /// Both ends of a row are sized to the whole row — the name and the status
 /// beneath it — rather than to the single line they happen to sit beside. It
