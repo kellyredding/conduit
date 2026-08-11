@@ -228,6 +228,86 @@ check(
     Set(MenuIconState.allCases.map(\.symbolName)).count == MenuIconState.allCases.count
 )
 
+// MARK: - Reconciling profiles against connections
+
+func profile(_ name: String) -> VPNProfile {
+    let json = #"{"profile-name": "\#(name)"}"#
+    return try! VPNPayload.profiles(Data("[\(json)]".utf8))[0]
+}
+
+func connection(_ name: String, _ status: String, at stamp: String? = nil) -> VPNConnection {
+    var fields = #""profile-name": "\#(name)", "connection-status": "\#(status)""#
+    if let stamp { fields += #", "last-updated-at": "\#(stamp)""# }
+    return try! VPNPayload.connections(Data("[{\(fields)}]".utf8))[0]
+}
+
+let never: (String) -> Bool = { _ in false }
+
+// Absence from the connection listing IS the answer, not a gap to fill by
+// asking again.
+let reconciled = ProfileReconciler.states(
+    profiles: [profile("Alpha"), profile("Bravo"), profile("Charlie")],
+    connections: [connection("Bravo", "Connected", at: "2026-01-01T12:00:00-05:00")],
+    isSensitive: never
+)
+check("every profile gets a row", reconciled.count == 3)
+check(
+    "a profile absent from the listing reads as not connected",
+    reconciled.first { $0.name == "Alpha" }?.status == .notConnected
+)
+check(
+    "a listed profile carries its state",
+    reconciled.first { $0.name == "Bravo" }?.isConnected == true
+)
+check(
+    "a listed profile carries its timestamp",
+    reconciled.first { $0.name == "Bravo" }?.updatedAt != nil
+)
+check(
+    "an absent profile carries no timestamp",
+    reconciled.first { $0.name == "Alpha" }?.updatedAt == nil
+)
+check(
+    "row order follows the profile listing, not the connection listing",
+    reconciled.map(\.name) == ["Alpha", "Bravo", "Charlie"]
+)
+
+// Flattening this to "not connected" would report the opposite of a live
+// tunnel for whatever state a future client release adds.
+let strange = ProfileReconciler.states(
+    profiles: [profile("Alpha")],
+    connections: [connection("Alpha", "Teleporting")],
+    isSensitive: never
+)
+check("an unknown live state is not flattened to disconnected", strange[0].status == nil)
+check("an unknown live state keeps its text", strange[0].rawStatus == "Teleporting")
+check("an unknown live state still reads as in flight", strange[0].isInFlight == false)
+
+// A live tunnel invisible in the menu is the worst thing this app could do.
+check(
+    "a connection with no matching profile is surfaced, not dropped",
+    ProfileReconciler.orphanedConnections(
+        profiles: [profile("Alpha")],
+        connections: [connection("Ghost", "Connected")]
+    ).map(\.name) == ["Ghost"]
+)
+check(
+    "nothing is reported orphaned when every connection has a profile",
+    ProfileReconciler.orphanedConnections(
+        profiles: [profile("Alpha")],
+        connections: [connection("Alpha", "Connected")]
+    ).isEmpty
+)
+
+check(
+    "the sensitivity rule is applied per profile",
+    ProfileReconciler.states(
+        profiles: [profile("Alpha"), profile("Prod-Bravo")],
+        connections: [],
+        isSensitive: { $0.hasPrefix("Prod") }
+    ).map(\.isSensitive) == [false, true]
+)
+
 // MARK: - The subprocess layer, against a fixture client
 //
 // These are the two behaviors that made a general-purpose runner unusable
