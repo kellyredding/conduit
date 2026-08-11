@@ -22,9 +22,14 @@ targets:
         CFBundleExecutable: $(EXECUTABLE_NAME)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSHighResolutionCapable: true
-        # A menu bar accessory: no Dock icon, no application menu of its own.
-        # The diagnostics window is still an ordinary window and can take focus.
-        LSUIElement: true
+        # NB: deliberately NOT LSUIElement. That key declares a background
+        # agent, and application launchers, the Dock, and the ⌘-Tab switcher
+        # all skip those by design — which makes the app impossible to find
+        # the first time, and after a rebuild.
+        #
+        # AppDelegate sets .accessory at launch instead. Launch Services
+        # indexes an ordinary application and every launcher lists it, while
+        # the running process still has no Dock icon and no switcher entry.
     settings:
       base:
         PRODUCT_NAME: Conduit

@@ -7,6 +7,12 @@ import SwiftUI
 /// time.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Becomes a menu bar accessory here rather than through LSUIElement in
+        // the bundle. The key would hide it from Launch Services as well as
+        // from the Dock, and an application nothing can find is a poor one to
+        // ship — doing it at runtime keeps the icon out of the Dock and the
+        // ⌘-Tab switcher while leaving it listed everywhere it is looked for.
+        NSApp.setActivationPolicy(.accessory)
         Task { @MainActor in VPNStore.shared.start() }
     }
 
