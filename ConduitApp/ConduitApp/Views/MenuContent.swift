@@ -144,13 +144,14 @@ private struct ProfileRow: View {
         .padding(.vertical, 8)
     }
 
-    // A progression in solidity rather than three unrelated marks: scattered
-    // dots for nothing, a broken ring for something forming, a solid disc for
-    // something there. A continuous ring read as a state of its own — too
-    // close to the filled disc to scan past, and too definite for "absent".
+    // Dashed ring, solid ring, then the bolt itself knocked out of a filled
+    // disc. The connected mark is the only one that carries the bolt, which
+    // ties the live row to the same shape the menu bar is showing at that
+    // moment; the two empty rings differ enough from each other to scan, and
+    // both differ from a filled disc by more than weight.
     private var indicator: String {
-        if profile.isInFlight { return "circle.dashed" }
-        return profile.isConnected ? "circle.fill" : "circle.dotted"
+        if profile.isInFlight { return "circle" }
+        return profile.isConnected ? "bolt.horizontal.circle.fill" : "circle.dashed"
     }
 
     // Cumulative totals, which is all the client reports. Rates require
