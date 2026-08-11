@@ -34,8 +34,13 @@ install: check build
 	install -d $(BINDIR) $(LINKDIR)
 	install -m 755 $(BUILDDIR)/conduit-vpn $(BINDIR)/conduit-vpn
 	ln -sfn $(BINDIR)/conduit-vpn $(LINKDIR)/conduit-vpn
+	@# Documents every setting, and is never read back. Regenerated on each
+	@# install so it tracks the defaults in the binary beside it, rather than
+	@# the ones that happened to ship the first time it was written.
+	$(BINDIR)/conduit-vpn config example > $(PREFIX)/config.example.json
 	@echo "installed $(BINDIR)/conduit-vpn"
 	@echo "linked    $(LINKDIR)/conduit-vpn"
+	@echo "wrote     $(PREFIX)/config.example.json"
 
 clean:
 	rm -rf $(BUILDDIR) lib .shards
