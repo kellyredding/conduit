@@ -4,19 +4,12 @@ options:
   deploymentTarget:
     macOS: "14.0"
 
-packages:
-  Galactic:
-    path: ../../Galactic
-
 targets:
   ConduitApp:
     type: application
     platform: macOS
     sources:
       - ConduitApp
-    dependencies:
-      - package: Galactic
-        product: Galactic
     info:
       path: ConduitApp/Info.plist
       properties:
@@ -45,13 +38,16 @@ targets:
         # both, and there is no entitlement that restores them.
         ENABLE_APP_SANDBOX: NO
 
-  # Sandboxed smoke check: no app launch, no AppKit, no subprocesses. It
+  # Sandboxed smoke check: no app launch, no AppKit, no window server. It
   # compiles the model layer and exercises it directly, which is only possible
-  # because that layer depends on Foundation and nothing else.
+  # because that layer depends on Foundation and nothing else — including the
+  # subprocess runner, so the HOME override and the error-envelope handling are
+  # covered against a fixture rather than asserted in a comment.
   #
   # The seam is load-bearing: anything added under Models must stay
-  # Foundation-only. Talking to the client lives under Services, which this
-  # target does not compile and must not need.
+  # Foundation-only. Polling schedules, menu state, and views depend on AppKit
+  # and SwiftUI, so they live outside Models and this target neither compiles
+  # them nor needs to.
   VPNSmoke:
     type: tool
     platform: macOS

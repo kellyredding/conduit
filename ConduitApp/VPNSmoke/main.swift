@@ -228,6 +228,135 @@ check(
     Set(MenuIconState.allCases.map(\.symbolName)).count == MenuIconState.allCases.count
 )
 
+// MARK: - The subprocess layer, against a fixture client
+//
+// These are the two behaviors that made a general-purpose runner unusable
+// here, so they are checked rather than asserted in a comment: the child must
+// receive an overridden HOME, and a failure must surface the message the
+// client wrote to standard *output*.
+
+func runBlocking<T>(_ operation: @escaping () async throws -> T) -> Result<T, Error> {
+    let semaphore = DispatchSemaphore(value: 0)
+    var outcome: Result<T, Error>!
+    Task {
+        do { outcome = .success(try await operation()) } catch { outcome = .failure(error) }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return outcome
+}
+
+let fixtureRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("conduit-smoke-\(ProcessInfo.processInfo.processIdentifier)")
+    // Temporary directories here sit behind symlinked parents, and the client
+    // home check compares a resolved path against a literal one. Resolving now
+    // means the check exercises what a real install looks like rather than
+    // failing for a reason that has nothing to do with it.
+    .resolvingSymlinksInPath()
+
+try? FileManager.default.createDirectory(
+    at: fixtureRoot, withIntermediateDirectories: true
+)
+defer { try? FileManager.default.removeItem(at: fixtureRoot) }
+
+let callLog = fixtureRoot.appendingPathComponent("calls.log")
+let fixtureClient = fixtureRoot.appendingPathComponent("aws-vpn-client")
+
+// Records the HOME it was handed, then answers from the environment. Errors
+// go to stdout with a non-zero exit, matching the real client's convention.
+let script = """
+#!/bin/sh
+printf 'HOME=%s ARGS=%s\\n' "$HOME" "$*" >> "\(callLog.path)"
+if [ -n "${FIXTURE_STDOUT:-}" ]; then printf '%s' "$FIXTURE_STDOUT"; fi
+if [ -n "${FIXTURE_STDERR:-}" ]; then printf '%s' "$FIXTURE_STDERR" >&2; fi
+exit "${FIXTURE_EXIT:-0}"
+"""
+try? script.write(to: fixtureClient, atomically: true, encoding: .utf8)
+try? FileManager.default.setAttributes(
+    [.posixPermissions: 0o755], ofItemAtPath: fixtureClient.path
+)
+
+let clientHome = fixtureRoot.appendingPathComponent("client-home")
+let client = VPNClient(binary: fixtureClient, clientHome: clientHome)
+
+// A successful listing, with the HOME override observable in the call log.
+setenv("FIXTURE_STDOUT", #"[{"profile-name": "Alpha"}]"#, 1)
+let listed = runBlocking { try await client.listProfiles() }
+switch listed {
+case .success(let profiles):
+    check("the client layer decodes a listing", profiles.first?.name == "Alpha")
+case .failure(let error):
+    check("the client layer decodes a listing", false)
+    print("      \(error)")
+}
+
+let log = (try? String(contentsOf: callLog, encoding: .utf8)) ?? ""
+// The entire reason this application exists: the child must not inherit the
+// real HOME, or the client aborts before doing any work.
+check(
+    "the child receives the configured HOME, not the caller's",
+    log.contains("HOME=\(clientHome.path) ")
+)
+check("the client home is created on first use", 
+    FileManager.default.fileExists(
+        atPath: clientHome.appendingPathComponent(".config").path))
+
+// The behavior a stderr-only runner cannot provide.
+setenv("FIXTURE_STDOUT", #"{"status": "Error", "message": "Profile not found"}"#, 1)
+setenv("FIXTURE_EXIT", "1", 1)
+let failed = runBlocking { try await client.listProfiles() }
+switch failed {
+case .success:
+    check("a failing command surfaces the client's own message", false)
+case .failure(let error):
+    check(
+        "a failing command surfaces the client's own message",
+        (error as? VPNClient.Failure) == .commandFailed("Profile not found")
+    )
+}
+unsetenv("FIXTURE_EXIT")
+unsetenv("FIXTURE_STDOUT")
+
+// A missing binary is reported as such rather than as a failed command.
+let absent = VPNClient(
+    binary: fixtureRoot.appendingPathComponent("not-here"),
+    clientHome: clientHome
+)
+let missing = runBlocking { try await absent.listProfiles() }
+switch missing {
+case .success:
+    check("a missing client is named as missing", false)
+case .failure(let error):
+    check(
+        "a missing client is named as missing",
+        { if case .notInstalled = (error as? VPNClient.Failure) { return true }
+          return false }()
+    )
+}
+
+// The condition that makes the vendor's own interface unusable on this
+// machine, converted into a sentence instead of a crash inside the client.
+let crookedHome = fixtureRoot.appendingPathComponent("crooked-home")
+let elsewhere = fixtureRoot.appendingPathComponent("elsewhere")
+try? FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+try? FileManager.default.createDirectory(at: crookedHome, withIntermediateDirectories: true)
+try? FileManager.default.createSymbolicLink(
+    at: crookedHome.appendingPathComponent(".config"), withDestinationURL: elsewhere
+)
+
+let crooked = VPNClient(binary: fixtureClient, clientHome: crookedHome)
+let refused = runBlocking { try await crooked.listProfiles() }
+switch refused {
+case .success:
+    check("a symlinked client home is refused", false)
+case .failure(let error):
+    check(
+        "a symlinked client home is refused",
+        { if case .homeNotCanonical = (error as? VPNClient.Failure) { return true }
+          return false }()
+    )
+}
+
 // MARK: - Result
 
 print("")
