@@ -36,7 +36,7 @@ struct MenuContent: View {
                 if anySensitive {
                     HStack(spacing: 6) {
                         Image(systemName: sensitiveSymbol)
-                            .font(.system(size: 11))
+                            .font(.system(size: 12))
                         Text("needs confirmation to connect")
                     }
                     .font(.caption2)
@@ -93,6 +93,13 @@ struct MenuContent: View {
 /// Shared so the legend and the rows cannot fall out of step.
 let sensitiveSymbol = "exclamationmark.shield.fill"
 
+/// Both ends of a row are sized to the whole row — the name and the status
+/// beneath it — rather than to the single line they happen to sit beside. It
+/// makes the row read as one object with a state at each end, and it keeps the
+/// two marks the same weight as each other, which they would not be if each
+/// were sized to its own neighbour.
+private let rowMarkSize: CGFloat = 22
+
 private struct ProfileRow: View {
     let profile: ProfileState
     let counters: VPNByteCounters?
@@ -100,9 +107,9 @@ private struct ProfileRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: indicator)
-                .font(.system(size: 11))
+                .font(.system(size: rowMarkSize, weight: .regular))
                 .foregroundStyle(profile.isConnected ? .primary : .tertiary)
-                .frame(width: 14)
+                .frame(width: rowMarkSize + 2)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(profile.name)
@@ -130,7 +137,7 @@ private struct ProfileRow: View {
                 // a person is allowed to do without thinking, so it is the one
                 // thing that should be legible before the row is read.
                 Image(systemName: sensitiveSymbol)
-                    .font(.system(size: 22, weight: .regular))
+                    .font(.system(size: rowMarkSize, weight: .regular))
                     .foregroundStyle(.secondary)
                     .help("Needs confirmation before connecting")
             }
