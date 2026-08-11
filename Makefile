@@ -21,14 +21,21 @@ cli-format:  ; $(MAKE) -C tools/conduit-vpn format
 cli-install: ; $(MAKE) -C tools/conduit-vpn install
 cli-clean:   ; $(MAKE) -C tools/conduit-vpn clean
 
-# --- Aggregates ---
-#
-# The macOS app has no targets here yet. They arrive with the app rather
-# than being stubbed now, so every target in this file works when invoked.
+# --- Swift app ---
 
-build:   cli-build
-install: cli-install
-clean:   cli-clean
+app-build:     ; $(MAKE) -C ConduitApp build
+app-smoke:     ; $(MAKE) -C ConduitApp smoke
+app-check:     ; $(MAKE) -C ConduitApp check
+app-release:   ; $(MAKE) -C ConduitApp release
+app-install:   ; $(MAKE) -C ConduitApp install
+app-uninstall: ; $(MAKE) -C ConduitApp uninstall
+app-clean:     ; $(MAKE) -C ConduitApp clean
+
+# --- Aggregates ---
+
+build:   cli-build app-build
+install: cli-install app-install
+clean:   cli-clean app-clean
 
 check:  audit cli-lint cli-test cli-build
 dev:    cli-dev

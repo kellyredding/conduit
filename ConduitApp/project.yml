@@ -1,0 +1,63 @@
+name: ConduitApp
+options:
+  bundleIdPrefix: com.kellyredding
+  deploymentTarget:
+    macOS: "14.0"
+
+packages:
+  Galactic:
+    path: ../../Galactic
+
+targets:
+  ConduitApp:
+    type: application
+    platform: macOS
+    sources:
+      - ConduitApp
+    dependencies:
+      - package: Galactic
+        product: Galactic
+    info:
+      path: ConduitApp/Info.plist
+      properties:
+        CFBundleName: Conduit
+        CFBundleDisplayName: Conduit
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundlePackageType: APPL
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHighResolutionCapable: true
+        # A menu bar accessory: no Dock icon, no application menu of its own.
+        # The diagnostics window is still an ordinary window and can take focus.
+        LSUIElement: true
+    settings:
+      base:
+        PRODUCT_NAME: Conduit
+        EXECUTABLE_NAME: Conduit
+        PRODUCT_BUNDLE_IDENTIFIER: com.kellyredding.Conduit
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.10"
+        # Deliberately NOT sandboxed. The app executes a binary in
+        # /Applications and reads system routing state; the sandbox forecloses
+        # both, and there is no entitlement that restores them.
+        ENABLE_APP_SANDBOX: NO
+
+  # Sandboxed smoke check: no app launch, no AppKit, no subprocesses. It
+  # compiles the model layer and exercises it directly, which is only possible
+  # because that layer depends on Foundation and nothing else.
+  #
+  # The seam is load-bearing: anything added under Models must stay
+  # Foundation-only. Talking to the client lives under Services, which this
+  # target does not compile and must not need.
+  VPNSmoke:
+    type: tool
+    platform: macOS
+    sources:
+      - ConduitApp/Models
+      - VPNSmoke
+    settings:
+      base:
+        SWIFT_VERSION: "5.10"
