@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Stand-in for the AWS VPN Client command-line binary.
+#
+# Behavior comes entirely from the environment so each example scripts its
+# own scenario without this file growing a case per test:
+#
+#   FAKE_VPN_CALL_LOG      append one line per invocation, recording HOME and
+#                          the arguments. HOME is recorded because the whole
+#                          point of the wrapper is that it overrides it, and
+#                          an assertion that reads the log is the only way to
+#                          observe that from outside.
+#
+#   FAKE_VPN_RESPONSES     directory of canned stdout, one file per call:
+#                          <subcommand>.1, <subcommand>.2, ... consumed in
+#                          order. Once the sequence runs out the highest
+#                          numbered file repeats, so a spec that polls an
+#                          unknown number of times still terminates.
+#
+#   FAKE_VPN_EXIT_<CMD>    exit code for one subcommand, with the name
+#                          upcased and hyphens turned into underscores:
+#                          list-profiles becomes FAKE_VPN_EXIT_LIST_PROFILES.
+#
+# Anything unset means: log nothing, print nothing, exit 0.
+
+set -euo pipefail
+
+sub="${1:-}"
+
+if [ -n "${FAKE_VPN_CALL_LOG:-}" ]; then
+  printf 'HOME=%s ARGS=%s\n' "$HOME" "$*" >> "$FAKE_VPN_CALL_LOG"
+fi
+
+if [ -n "${FAKE_VPN_RESPONSES:-}" ] && [ -n "$sub" ]; then
+  dir="$FAKE_VPN_RESPONSES"
+  counter="$dir/.count.$sub"
+
+  n=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "$n" > "$counter"
+
+  # Walk the sequence numerically. A glob would order .10 before .2, which
+  # only bites once a spec scripts ten responses — the worst moment to
+  # discover it.
+  last=""
+  i=1
+  while [ -f "$dir/$sub.$i" ]; do
+    last="$dir/$sub.$i"
+    i=$((i + 1))
+  done
+
+  if [ -f "$dir/$sub.$n" ]; then
+    cat "$dir/$sub.$n"
+  elif [ -n "$last" ]; then
+    cat "$last"
+  fi
+fi
+
+exit_var="FAKE_VPN_EXIT_$(printf '%s' "$sub" | tr 'a-z-' 'A-Z_')"
+exit "${!exit_var:-0}"

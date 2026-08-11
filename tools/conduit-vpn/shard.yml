@@ -1,0 +1,15 @@
+name: conduit-vpn
+version: 0.1.0
+description: |
+  Command-line client for AWS Client VPN — companion to Conduit.app.
+
+authors:
+  - Kelly Redding <kelly@kellyredding.com>
+
+targets:
+  conduit-vpn:
+    main: src/conduit_vpn.cr
+
+crystal: ">= 1.0.0"
+
+license: MIT
