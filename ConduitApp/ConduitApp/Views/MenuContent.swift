@@ -86,11 +86,10 @@ struct MenuContent: View {
     }
 }
 
-/// Taken from the icon state rather than written out again. A row marked with
-/// one shield while the bar shows a different one teaches that the two mean
-/// different things, and the only way to guarantee they never diverge is for
-/// there to be a single source for the name.
-private let sensitiveSymbol = MenuIconState.sensitive.symbolName
+/// The panel is the only surface that marks a sensitive row — the menu bar has
+/// no glyph for it, having found none readable at that size — so the name lives
+/// with the rule rather than with the icon states.
+private let sensitiveSymbol = Sensitivity.markSymbolName
 
 /// Both ends of a row are sized to the whole row — the name and the status
 /// beneath it — rather than to the single line they happen to sit beside. It

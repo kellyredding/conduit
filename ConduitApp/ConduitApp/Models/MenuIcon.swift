@@ -10,7 +10,6 @@ enum MenuIconState: String, CaseIterable, Sendable {
     case idle
     case connecting
     case connected
-    case sensitive
     case error
 
     /// The three states seen daily share one shape, the horizontal bolt, and
@@ -28,16 +27,22 @@ enum MenuIconState: String, CaseIterable, Sendable {
     /// pair reads at a glance and the concern did not survive contact. Kept as
     /// a note because the reasoning would otherwise look like an oversight.
     ///
-    /// **`sensitive` and `error` leave the family**, because they have to: the
-    /// horizontal variants stop at `.circle`, with no shield and no error
-    /// badge in that orientation. Both are rare states, so the inconsistency
-    /// falls where it is least often seen.
+    /// **`error` leaves the family** because it has to: the horizontal variants
+    /// stop at `.circle`, with no error badge in that orientation. It is the
+    /// rarest state, so the inconsistency falls where it is least often seen.
+    ///
+    /// **There is no state here for a sensitive connection.** There was, and
+    /// it was removed after looking at it: every candidate either carried its
+    /// meaning in interior detail that dies at this size, or gained enough
+    /// mass to read only by abandoning the shape the other states share. A
+    /// glyph that cannot be told apart is not a state, it is noise wearing
+    /// one — and the panel already marks those rows, where there is room to
+    /// mark them legibly. See `Sensitivity.markSymbolName`.
     var symbolName: String {
         switch self {
         case .idle: return "bolt.horizontal"
         case .connecting: return "bolt.horizontal.circle"
         case .connected: return "bolt.horizontal.fill"
-        case .sensitive: return "bolt.shield.fill"
         case .error: return "bolt.trianglebadge.exclamationmark.fill"
         }
     }
@@ -53,7 +58,6 @@ enum MenuIconState: String, CaseIterable, Sendable {
         case .idle: return "No VPN connection"
         case .connecting: return "VPN connecting"
         case .connected: return "VPN connected"
-        case .sensitive: return "VPN connected to a sensitive profile"
         case .error: return "VPN unavailable"
         }
     }
@@ -90,20 +94,20 @@ enum ClientHealth: Equatable, Sendable {
 enum MenuIcon {
     /// Highest wins.
     ///
-    /// `connecting` outranks `sensitive` because it is transient and resolves
-    /// within seconds, while a sensitive tunnel persists and reasserts itself
-    /// the moment the attempt settles. Ordering them the other way would leave
-    /// the bar showing a steady state during the one window where something is
-    /// actively changing.
+    /// `connecting` outranks `connected` because it is the transient one: a
+    /// settled tunnel will still be there in two seconds, while the window in
+    /// which something is actively changing is the whole of what it has to
+    /// report.
+    ///
+    /// Sensitivity is deliberately absent. Whether a live tunnel is one that
+    /// warranted saying yes to does not change what the bar shows, because no
+    /// glyph tested could carry that at this size — the panel says it instead.
     static func state(
         for profiles: [ProfileState],
         health: ClientHealth
     ) -> MenuIconState {
         if health.isUnavailable { return .error }
         if profiles.contains(where: \.isInFlight) { return .connecting }
-        if profiles.contains(where: { $0.isConnected && $0.isSensitive }) {
-            return .sensitive
-        }
         if profiles.contains(where: \.isConnected) { return .connected }
         return .idle
     }

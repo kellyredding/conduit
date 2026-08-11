@@ -9,6 +9,14 @@ import Foundation
 /// confirmation behind. Divergence here would be worse than having no rule:
 /// it would teach that the mark in the menu means something it does not.
 enum Sensitivity {
+    /// How a row carrying this rule is marked in the panel.
+    ///
+    /// It lives here rather than on the icon state because the menu bar has no
+    /// sensitive state to name it: nothing legible at that size survived. The
+    /// concept is real, the mark is real, and the only surface with room to
+    /// show it is the one that owns this constant's only caller.
+    static let markSymbolName = "bolt.shield.fill"
+
     /// An empty pattern disables the check. Handing an empty string to a
     /// regular expression would instead match every profile, turning "I do not
     /// want this" into "guard everything" — the opposite of what emptying a

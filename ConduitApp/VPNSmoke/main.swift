@@ -1,5 +1,23 @@
 import Foundation
 
+// Isolate the settings before anything reads them. Without this the checks
+// resolve against whatever is in the real ~/.conduit/config.json and whatever
+// CONDUIT_* variables happen to be exported, so an assertion about a compiled
+// default passes or fails depending on how the machine is configured that
+// afternoon — which is not an assertion about the code at all.
+//
+// Found the hard way: changing the live sensitivity pattern to try something
+// out turned two of these red.
+setenv("CONDUIT_ROOT", NSTemporaryDirectory() + "conduit-smoke-root", 1)
+setenv("CONDUIT_CONFIG", NSTemporaryDirectory() + "conduit-smoke-absent.json", 1)
+for name in [
+    "CONDUIT_CLIENT_PATH", "CONDUIT_CLIENT_HOME", "CONDUIT_SENSITIVE_PATTERN",
+    "CONDUIT_POLL_ACTIVE", "CONDUIT_POLL_IDLE", "CONDUIT_CONNECT_TIMEOUT",
+    "CONDUIT_IDENTITY_HINT_AFTER", "CONDUIT_CONNECT_GRACE_POLLS",
+] {
+    unsetenv(name)
+}
+
 // Sandboxed smoke check for the model layer: no app launch, no AppKit, no
 // subprocess, no network. It exercises decoding, settings resolution, the
 // sensitivity rule, and the menu icon reduction against fixtures held here.
@@ -193,17 +211,24 @@ check(
         health: .ready
     ) == .connected
 )
+// The bar deliberately says nothing about sensitivity: no glyph tested could
+// carry it at that size. A live tunnel reads as live whether or not connecting
+// to it warranted a second thought, and the panel marks the row instead.
 check(
-    "a sensitive tunnel outranks an ordinary one",
+    "a sensitive tunnel reads in the bar exactly like any other",
     MenuIcon.state(
-        for: [state("Alpha", .connected), state("Prod", .connected, sensitive: true)],
+        for: [state("Prod", .connected, sensitive: true)],
         health: .ready
-    ) == .sensitive
+    ) == .connected
+)
+check(
+    "the rule still exists, and still has a mark for the panel",
+    !Sensitivity.markSymbolName.isEmpty && Sensitivity.isSensitive("Prod-Alpha")
 )
 // Transient, and it resolves in seconds; a steady mark during the one window
 // where something is actively changing would be the wrong report.
 check(
-    "an attempt in flight outranks a sensitive tunnel",
+    "an attempt in flight outranks a live tunnel",
     MenuIcon.state(
         for: [state("Prod", .connected, sensitive: true), state("Alpha", .connecting)],
         health: .ready
