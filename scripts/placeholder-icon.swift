@@ -17,9 +17,20 @@
 
 import AppKit
 
-let output = CommandLine.arguments.count > 1
-    ? CommandLine.arguments[1]
-    : "placeholder-icon.png"
+// out.png [topHex] [bottomHex] [inkHex] [symbolName]
+let arguments = CommandLine.arguments
+let output = arguments.count > 1 ? arguments[1] : "placeholder-icon.png"
+
+func color(_ hex: String) -> NSColor {
+    var value: UInt64 = 0
+    Scanner(string: hex.replacingOccurrences(of: "#", with: "")).scanHexInt64(&value)
+    return NSColor(
+        srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+        green: CGFloat((value >> 8) & 0xFF) / 255,
+        blue: CGFloat(value & 0xFF) / 255,
+        alpha: 1
+    )
+}
 
 let side = 1024
 let size = CGFloat(side)
@@ -38,32 +49,42 @@ else { fatalError("could not allocate the bitmap") }
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
 
-let indigo = NSColor(srgbRed: 0.227, green: 0.184, blue: 0.749, alpha: 1)
-let violet = NSColor(srgbRed: 0.482, green: 0.247, blue: 0.894, alpha: 1)
+let top = color(arguments.count > 2 ? arguments[2] : "#3A3A3C")
+let bottom = color(arguments.count > 3 ? arguments[3] : "#1C1C1E")
+let ink = color(arguments.count > 4 ? arguments[4] : "#FFFFFF")
 
 // Top-left to bottom-right, matching the brief.
-NSGradient(starting: indigo, ending: violet)?
+NSGradient(starting: top, ending: bottom)?
     .draw(in: CGRect(x: 0, y: 0, width: size, height: size), angle: -45)
 
 // The same symbol the menu bar draws for a live tunnel, so the Dock and the
-// bar read as one tool rather than two.
-if let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil) {
+// bar read as one tool rather than two. Defaults to the connected glyph;
+// pass another name to preview an alternative.
+let symbolName = arguments.count > 5 ? arguments[5] : "bolt.horizontal.fill"
+
+if let bolt = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
     let configured = bolt.withSymbolConfiguration(
-        NSImage.SymbolConfiguration(pointSize: size * 0.55, weight: .medium)
+        NSImage.SymbolConfiguration(pointSize: 512, weight: .medium)
     ) ?? bolt
 
+    // Fitted by its larger dimension rather than by point size. A horizontal
+    // glyph is wider than it is tall, so sizing by height alone would leave it
+    // small and lost in the frame while a vertical one filled it.
     let drawn = configured.size
+    let target = size * 0.58
+    let scale = target / max(drawn.width, drawn.height)
+    let fitted = CGSize(width: drawn.width * scale, height: drawn.height * scale)
     let rect = CGRect(
-        x: (size - drawn.width) / 2,
-        y: (size - drawn.height) / 2,
-        width: drawn.width,
-        height: drawn.height
+        x: (size - fitted.width) / 2,
+        y: (size - fitted.height) / 2,
+        width: fitted.width,
+        height: fitted.height
     )
 
     // Template fill: the symbol supplies the mask, white supplies the pixels.
     NSGraphicsContext.current?.cgContext.beginTransparencyLayer(auxiliaryInfo: nil)
     configured.draw(in: rect)
-    NSColor.white.setFill()
+    ink.setFill()
     rect.fill(using: .sourceAtop)
     NSGraphicsContext.current?.cgContext.endTransparencyLayer()
 }

@@ -13,25 +13,39 @@ enum MenuIconState: String, CaseIterable, Sendable {
     case sensitive
     case error
 
-    /// Two of these are load-bearing and should not be swapped casually.
+    /// The three states seen daily share one shape, the horizontal bolt, and
+    /// differ by treatment: hollow, ringed, filled. Holding the family
+    /// constant is what makes a change in the bar register as a change in
+    /// state rather than as a different icon appearing.
     ///
-    /// `idle` is an outline because nothing is connected for most of the day,
-    /// making it the glyph on screen almost always; a loud idle state is noise
-    /// the user cannot dismiss.
+    /// Two things about this set are known rather than accidental.
     ///
-    /// `connecting` carries a clock rather than a spinner or another bolt,
-    /// because a clock reads as waiting on something external — which is
-    /// exactly what the sign-in state is, and the only state where doing
-    /// nothing is the correct response.
+    /// **`idle` and `connected` differ only by weight** — a hollow horizontal
+    /// bolt against a filled one — and that is the weakest separation in the
+    /// set, on the most important question it answers. It was chosen anyway,
+    /// for family consistency, over sets that broke the shape to gain a
+    /// stronger contrast. If it proves hard to read in practice the fix is
+    /// this table, not a redesign.
+    ///
+    /// **`sensitive` and `error` leave the family**, because they have to: the
+    /// horizontal variants stop at `.circle`, with no shield and no error
+    /// badge in that orientation. Both are rare states, so the inconsistency
+    /// falls where it is least often seen.
     var symbolName: String {
         switch self {
-        case .idle: return "bolt.slash"
-        case .connecting: return "bolt.badge.clock"
-        case .connected: return "bolt.fill"
+        case .idle: return "bolt.horizontal"
+        case .connecting: return "bolt.horizontal.circle"
+        case .connected: return "bolt.horizontal.fill"
         case .sensitive: return "bolt.shield.fill"
         case .error: return "bolt.trianglebadge.exclamationmark.fill"
         }
     }
+
+    /// The glyph the application icon is drawn from, so the Dock and the menu
+    /// bar are the same shape. Connected is the right one to borrow: it is
+    /// what the application is for, and the only state worth depicting when
+    /// the icon has to stand for the whole tool.
+    static var iconSymbolName: String { MenuIconState.connected.symbolName }
 
     var accessibilityLabel: String {
         switch self {
