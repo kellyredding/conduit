@@ -113,8 +113,31 @@ if [ -n "$DENYLIST" ] && [ -f "$DENYLIST" ]; then
   fi
   echo "  denylist: $DENYLIST"
 else
-  echo "  denylist: none found (structural checks only)"
-  echo "  create ~/.conduit/denylist.txt to also match literal terms"
+  # Refusing here rather than warning. A guard that quietly covers less than
+  # it claims is worse than no guard: the structural layer alone would still
+  # print "clean" and let the commit through, so a machine that was never set
+  # up would silently lose the literal layer with no signal at all.
+  cat <<'EOF'
+
+FAILED — no literal denylist found.
+
+The structural checks ran, but the terms that must never appear verbatim live
+outside this repository and none was located. Looked for, in order:
+  $CONDUIT_DENYLIST, ~/.conduit/denylist.txt, ./denylist.txt
+
+On a configured machine the file is a symlink into the sync tree. To restore:
+  mkdir -p ~/.conduit
+  ln -s ~/Sync/<user>/conduit/denylist.txt ~/.conduit/denylist.txt
+
+Symlink the file, never ~/.conduit itself — the client home beneath it has to
+be reachable without traversing a symlink.
+
+Working on a clone with no such list, and accepting structural checks alone:
+  CONDUIT_ALLOW_NO_DENYLIST=1 make check
+EOF
+  [ "${CONDUIT_ALLOW_NO_DENYLIST:-}" = "1" ] || exit 1
+  echo
+  echo "  denylist: none — proceeding on CONDUIT_ALLOW_NO_DENYLIST"
 fi
 
 if [ "$found" -ne 0 ]; then
