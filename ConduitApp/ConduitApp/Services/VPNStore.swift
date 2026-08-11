@@ -35,6 +35,15 @@ final class VPNStore: ObservableObject {
     private var pathMonitor: NWPathMonitor?
     private var observers: [NSObjectProtocol] = []
 
+    /// The profile listing, cached. Which profiles exist changes only when one
+    /// is imported or removed — never by this application, and rarely at all —
+    /// while which are connected changes constantly. Re-reading both at the
+    /// idle rate would double the subprocess count for an answer that is
+    /// almost always identical to the last one.
+    private var knownProfiles: [VPNProfile] = []
+    private var profilesReadAt: Date?
+    private let profileMaxAge: TimeInterval = 60
+
     init(client: VPNClient? = nil) {
         self.client = client ?? VPNClient.fromConfiguration()
     }
@@ -75,6 +84,9 @@ final class VPNStore: ObservableObject {
 
     func menuOpened() {
         menuIsOpen = true
+        // Opening the menu is the one moment a stale profile list would be
+        // seen, so it is the one moment worth paying for a fresh one.
+        profilesReadAt = nil
         // Restarting refreshes immediately rather than waiting out a sleep that
         // may have twenty seconds left on it — opening the menu is exactly when
         // a stale answer is most visible.
@@ -109,13 +121,34 @@ final class VPNStore: ObservableObject {
 
     // MARK: - Refresh
 
+    private var profilesAreStale: Bool {
+        guard let readAt = profilesReadAt, !knownProfiles.isEmpty else { return true }
+        return Date().timeIntervalSince(readAt) > profileMaxAge
+    }
+
     private func refresh() async {
         do {
-            let listedProfiles = try await client.listProfiles()
-            let listedConnections = try await client.listConnections()
+            if profilesAreStale {
+                knownProfiles = try await client.listProfiles()
+                profilesReadAt = Date()
+            }
+
+            var listedConnections = try await client.listConnections()
+
+            // A connection naming a profile the cache has never heard of means
+            // the cache is behind, and the cost of being wrong is a live tunnel
+            // that is invisible in the menu. Re-read once and reconcile against
+            // the truth rather than showing a partial answer for up to a minute.
+            if !ProfileReconciler.orphanedConnections(
+                profiles: knownProfiles, connections: listedConnections
+            ).isEmpty {
+                knownProfiles = try await client.listProfiles()
+                profilesReadAt = Date()
+                listedConnections = try await client.listConnections()
+            }
 
             profiles = ProfileReconciler.states(
-                profiles: listedProfiles,
+                profiles: knownProfiles,
                 connections: listedConnections
             )
             health = .ready
@@ -135,6 +168,9 @@ final class VPNStore: ObservableObject {
                 (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
             )
+            // Force a re-read once the client answers again: whatever went
+            // wrong may well have been a profile being added or removed.
+            profilesReadAt = nil
         }
     }
 

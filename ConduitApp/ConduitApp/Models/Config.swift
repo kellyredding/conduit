@@ -80,8 +80,13 @@ enum ConduitConfig {
         Key(
             name: "poll-interval-idle",
             env: "CONDUIT_POLL_IDLE",
-            description: "Seconds between status checks at rest.",
-            defaultValue: { "25" }
+            description: """
+                Seconds between connection checks at rest, with the menu \
+                closed. Only the connection listing is re-read at this rate; \
+                the profile listing is far more expensive to no purpose, \
+                since it changes only when a profile is imported or removed.
+                """,
+            defaultValue: { "5" }
         ),
         Key(
             name: "connect-timeout",

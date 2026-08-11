@@ -76,9 +76,11 @@ module ConduitVPN
       Key.new(
         name: "poll-interval-idle",
         env: "CONDUIT_POLL_IDLE",
-        description: "Seconds between status checks at rest. Used by the " \
-                     "menu bar application, which polls continuously.",
-        default: -> { "25" },
+        description: "Seconds between connection checks at rest, with the " \
+                     "menu closed. Used by the menu bar application, which " \
+                     "polls continuously; only the connection listing is " \
+                     "re-read at this rate.",
+        default: -> { "5" },
       ),
       Key.new(
         name: "connect-timeout",
