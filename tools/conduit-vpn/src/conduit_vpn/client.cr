@@ -12,7 +12,7 @@ module ConduitVPN
   # /Library/Application Support and the daemon socket is system-wide, so
   # the override changes only where the client writes its own logs.
   class Client
-    class NotInstalled < Exception
+    class NotInstalled < ConduitVPN::Error
       def initialize(binary : Path)
         super(<<-MSG)
         AWS VPN Client command-line binary not found at:
@@ -23,7 +23,7 @@ module ConduitVPN
       end
     end
 
-    class HomeNotCanonical < Exception
+    class HomeNotCanonical < ConduitVPN::Error
       def initialize(requested : Path, resolved : String)
         super(<<-MSG)
         #{requested} must be a real directory, not a symlink.
@@ -38,7 +38,7 @@ module ConduitVPN
     # A non-zero exit from the client. Errors arrive as a JSON envelope on
     # stdout rather than on stderr, so the message is recovered from the
     # captured output.
-    class CommandFailed < Exception
+    class CommandFailed < ConduitVPN::Error
       getter exit_code : Int32
       getter payload : String
 
@@ -103,7 +103,9 @@ module ConduitVPN
       ensure_client_home!
     end
 
-    private def ensure_installed! : Nil
+    # Public so that `doctor` can report on each precondition separately
+    # rather than inferring both from one failed command.
+    def ensure_installed! : Nil
       return if File::Info.executable?(@binary.to_s)
       raise NotInstalled.new(@binary)
     end
@@ -112,7 +114,7 @@ module ConduitVPN
     # directory can be removed, or acquire a synced parent, at any point
     # after installation — and the cost of being wrong is an opaque crash
     # inside the client instead of the message above.
-    private def ensure_client_home! : Nil
+    def ensure_client_home! : Nil
       config_dir = @client_home / ".config"
       Dir.mkdir_p(config_dir.to_s)
 

@@ -1,4 +1,8 @@
-require "./conduit_vpn/*"
+# Explicit and first: the glob below loads alphabetically, which would reach
+# the exception classes that descend from Error before Error itself exists.
+# A superclass has to be defined at the point its subclass is compiled.
+require "./conduit_vpn/error"
+require "./conduit_vpn/**"
 
 module ConduitVPN
   VERSION = {{ read_file("#{__DIR__}/../VERSION.txt").strip }}

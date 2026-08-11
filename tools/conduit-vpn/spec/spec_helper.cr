@@ -81,6 +81,25 @@ module SpecHelper
     end
   end
 
+  # In-process equivalent of `sandbox`, for examples that exercise the library
+  # directly rather than through the built binary.
+  def with_root(&)
+    dir = File.tempname("conduit-unit")
+    Dir.mkdir_p(dir)
+    real = Path.new(File.realpath(dir))
+    begin
+      with_env({"CONDUIT_ROOT" => real.to_s, "CONDUIT_CONFIG" => nil}) do
+        yield real
+      end
+    ensure
+      FileUtils.rm_rf(real.to_s)
+    end
+  end
+
+  def write_config(root : Path, body : String) : Nil
+    File.write((root / "config.json").to_s, body)
+  end
+
   def run(sandbox : Sandbox, args : Array(String),
           extra_env : Hash(String, String?) = {} of String => String?) : Result
     invoke(args, sandbox.env.merge(extra_env))
