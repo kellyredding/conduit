@@ -42,7 +42,26 @@ final class VPNStore: ObservableObject {
     /// almost always identical to the last one.
     private var knownProfiles: [VPNProfile] = []
     private var profilesReadAt: Date?
-    private let profileMaxAge: TimeInterval = 60
+
+    /// Deliberately far longer than any polling interval. At sixty seconds it
+    /// matched the idle interval exactly, so the entry expired on every cycle
+    /// and the cache did nothing but double the call rate — measured as one
+    /// profile listing for every connection listing while nominally idle.
+    ///
+    /// Staleness is bounded by events rather than by this number: the list is
+    /// re-read when the menu opens, after any failure, and whenever a
+    /// connection names a profile it does not contain. Those are the moments
+    /// being wrong would show. Between them, a profile appearing or vanishing
+    /// is something only the person who imported it knows about, and they can
+    /// open the menu.
+    private let profileMaxAge: TimeInterval = 30 * 60
+
+    /// Which network interfaces existed at the last path update, and when an
+    /// event last caused a look. Both exist to keep the path monitor from
+    /// driving the poll rate — see `pathChanged`.
+    private var knownInterfaces: Set<String> = []
+    private var lastEventRefresh = Date.distantPast
+    private let eventRefreshMinimumGap: TimeInterval = 3
 
     init(client: VPNClient? = nil) {
         self.client = client ?? VPNClient.fromConfiguration()
@@ -206,10 +225,36 @@ final class VPNStore: ObservableObject {
 
     private func observeNetwork() {
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] _ in
-            Task { @MainActor in self?.refreshNow() }
+        monitor.pathUpdateHandler = { [weak self] path in
+            let interfaces = Set(path.availableInterfaces.map(\.name))
+            Task { @MainActor in self?.pathChanged(to: interfaces) }
         }
         monitor.start(queue: DispatchQueue(label: "conduit.network.path"))
         pathMonitor = monitor
+    }
+
+    /// The monitor reports every path update, and most of them say nothing
+    /// about whether a tunnel exists: signal strength, route churn, a resolver
+    /// changing. Left unfiltered they drove the poll rate instead of the
+    /// interval doing it — measured at one look every twenty seconds while
+    /// nominally idling at sixty — and because each one restarted the loop,
+    /// a burst could cancel an in-flight read repeatedly and complete none.
+    ///
+    /// A tunnel coming up or going away adds or removes an interface. Nothing
+    /// else here is a reason to look early.
+    private func pathChanged(to interfaces: Set<String>) {
+        guard interfaces != knownInterfaces else { return }
+        knownInterfaces = interfaces
+        refreshAfterEvent()
+    }
+
+    /// Coalesces bursts. Interfaces can appear and disappear several times
+    /// while a tunnel establishes, and each of those is the same news.
+    private func refreshAfterEvent() {
+        let now = Date()
+        guard now.timeIntervalSince(lastEventRefresh) >= eventRefreshMinimumGap
+        else { return }
+        lastEventRefresh = now
+        refreshNow()
     }
 }
