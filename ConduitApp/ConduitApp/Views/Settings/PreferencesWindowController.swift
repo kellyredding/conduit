@@ -22,12 +22,6 @@ final class PreferencesWindowController: NSWindowController {
     private var escapeMonitor: Any?
     private var themeObserver: AnyCancellable?
 
-    /// Whether a settings window is on screen, so dismissing the panel does
-    /// not send the application — and that window with it — to the back.
-    static var isShowing: Bool {
-        shared?.window?.isVisible == true
-    }
-
     static func showPreferences() {
         if shared == nil { shared = PreferencesWindowController() }
         guard let controller = shared, let window = controller.window else { return }
