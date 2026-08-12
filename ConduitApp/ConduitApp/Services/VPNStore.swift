@@ -56,10 +56,7 @@ final class VPNStore: ObservableObject {
     /// open the menu.
     private let profileMaxAge: TimeInterval = 30 * 60
 
-    /// Which network interfaces existed at the last path update, and when an
-    /// event last caused a look. Both exist to keep the path monitor from
-    /// driving the poll rate — see `pathChanged`.
-    private var knownInterfaces: Set<String> = []
+    /// When an event last caused a look, so a burst of them causes one.
     private var lastEventRefresh = Date.distantPast
     private let eventRefreshMinimumGap: TimeInterval = 3
 
@@ -225,29 +222,30 @@ final class VPNStore: ObservableObject {
 
     private func observeNetwork() {
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
-            let interfaces = Set(path.availableInterfaces.map(\.name))
-            Task { @MainActor in self?.pathChanged(to: interfaces) }
+        monitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor in self?.refreshAfterEvent() }
         }
         monitor.start(queue: DispatchQueue(label: "conduit.network.path"))
         pathMonitor = monitor
     }
 
-    /// The monitor reports every path update, and most of them say nothing
-    /// about whether a tunnel exists: signal strength, route churn, a resolver
-    /// changing. Left unfiltered they drove the poll rate instead of the
-    /// interval doing it — measured at one look every twenty seconds while
-    /// nominally idling at sixty — and because each one restarted the loop,
-    /// a burst could cancel an in-flight read repeatedly and complete none.
+    /// The monitor reports every path update, and most say nothing about
+    /// whether a tunnel exists. Left completely unfiltered they drove the poll
+    /// rate instead of the interval doing it — measured at one look every
+    /// twenty seconds while nominally idling at sixty.
     ///
-    /// A tunnel coming up or going away adds or removes an interface. Nothing
-    /// else here is a reason to look early.
-    private func pathChanged(to interfaces: Set<String>) {
-        guard interfaces != knownInterfaces else { return }
-        knownInterfaces = interfaces
-        refreshAfterEvent()
-    }
-
+    /// Filtering them by which interfaces exist was tried and was much worse.
+    /// These tunnels are split: they add routes without becoming the default
+    /// route, and `availableInterfaces` never lists them — it reported the
+    /// same single interface across eight updates spanning a full connect and
+    /// disconnect. Every event was discarded, so nothing triggered a look at
+    /// all, and a resting interval was then justified by a safety net that had
+    /// quietly been removed. A connection made elsewhere lived and died
+    /// entirely between two polls and never appeared.
+    ///
+    /// So the filter is on time rather than on identity. The volume was the
+    /// problem; the signal was always good. An extra look costs one query, and
+    /// a missed one costs the thing this application is for.
     /// Coalesces bursts. Interfaces can appear and disappear several times
     /// while a tunnel establishes, and each of those is the same news.
     private func refreshAfterEvent() {
