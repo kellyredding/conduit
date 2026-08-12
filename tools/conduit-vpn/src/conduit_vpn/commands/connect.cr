@@ -3,7 +3,30 @@ module ConduitVPN
     module Connect
       extend self
 
+      HELP = <<-TEXT
+        conduit-vpn connect — start a connection to a profile
+
+        Added by Conduit:
+          --wait          Watch the attempt through to a terminal state rather
+                          than returning as soon as the client accepts it.
+                          The exit code then means something:
+                            0  connected
+                            1  did not connect
+                            3  stopped watching — sign-in may still be waiting
+                               in a browser, so this is not a failure
+          --yes, -y       Confirm a profile the sensitivity rule marks. Without
+                          it such a profile is refused before the client is
+                          touched at all, so nothing is recorded anywhere.
+          --timeout N     Seconds to keep watching with --wait. Defaults to the
+                          connect-timeout setting.
+
+        Conduit also disconnects any other live tunnel first — one tunnel at a
+        time, whoever asked for it.
+        TEXT
+
       def run(argv : Array(String)) : Int32
+        return CLI.extended_help("connect", HELP) if CLI.help_requested?(argv)
+
         flags = Flags.split(argv)
         profile = Flags.value_of(flags.forward, "--profile-name")
 

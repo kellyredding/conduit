@@ -3,7 +3,26 @@ module ConduitVPN
     module Disconnect
       extend self
 
+      HELP = <<-TEXT
+        conduit-vpn disconnect — disconnect a profile
+
+        Added by Conduit:
+          --wait          Watch until the profile actually reaches a resting
+                          state, rather than returning as soon as the client
+                          accepts the request. The client prints nothing at all
+                          on success, so without this the exit code is the only
+                          signal that anything happened.
+          --timeout N     Seconds to keep watching with --wait. Defaults to the
+                          connect-timeout setting.
+
+        Disconnecting also clears a stalled attempt, which is the only thing that
+        does — a profile held by one refuses every replacement for about ten
+        minutes while no tunnel exists.
+        TEXT
+
       def run(argv : Array(String)) : Int32
+        return CLI.extended_help("disconnect", HELP) if CLI.help_requested?(argv)
+
         flags = Flags.split(argv)
         profile = Flags.value_of(flags.forward, "--profile-name")
 

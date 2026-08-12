@@ -167,3 +167,62 @@ describe "conduit's own commands" do
     end
   end
 end
+
+# Help for the two commands Conduit extends used to be forwarded straight to the
+# client, which documents its own flags and knows nothing about Conduit's. The
+# one place a caller looks to learn whether --wait exists therefore said it did
+# not, and anything reasoning from that would go back to polling by hand.
+describe "help for an extended command" do
+  it "documents the flags Conduit adds to connect" do
+    SpecHelper.sandbox do |sandbox|
+      result = SpecHelper.run(sandbox, ["connect", "--help"])
+
+      result.exit_code.should eq(0)
+      result.stdout.should contain("--wait")
+      result.stdout.should contain("--yes")
+      result.stdout.should contain("--timeout")
+    end
+  end
+
+  # The distinction the exit codes exist to carry, stated where somebody
+  # deciding whether to retry will read it.
+  it "says a timeout is not a failure" do
+    SpecHelper.sandbox do |sandbox|
+      result = SpecHelper.run(sandbox, ["connect", "--help"])
+
+      result.stdout.should contain("not a failure")
+    end
+  end
+
+  it "documents the flags Conduit adds to disconnect" do
+    SpecHelper.sandbox do |sandbox|
+      result = SpecHelper.run(sandbox, ["disconnect", "--help"])
+
+      result.exit_code.should eq(0)
+      result.stdout.should contain("--wait")
+    end
+  end
+
+  # Conduit's half is printed first and then the client is asked for its own, so
+  # the command answers the whole question rather than half of it.
+  it "still asks the client for its own options" do
+    SpecHelper.sandbox do |sandbox|
+      SpecHelper.run(sandbox, ["connect", "--help"])
+
+      sandbox.calls.size.should eq(1)
+      sandbox.calls.first.should end_with("ARGS=connect --help")
+    end
+  end
+
+  # Asking for help must never start a connection, whatever else is on the line.
+  it "does not connect when help is requested alongside a profile" do
+    SpecHelper.sandbox do |sandbox|
+      SpecHelper.run(
+        sandbox, ["connect", "--profile-name", "Alpha", "--help"]
+      )
+
+      sandbox.calls.size.should eq(1)
+      sandbox.calls.first.should end_with("ARGS=connect --help")
+    end
+  end
+end

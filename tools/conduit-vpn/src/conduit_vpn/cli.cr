@@ -81,6 +81,33 @@ module ConduitVPN
       forward(argv)
     end
 
+    def help_requested?(argv : Array(String)) : Bool
+      argv.any? { |argument| argument == "--help" || argument == "-h" }
+    end
+
+    # Help for a command Conduit extends, showing both halves.
+    #
+    # `--help` on these was forwarded to the client, which documents its own
+    # flags and has never heard of Conduit's. So the one place a caller looks to
+    # find out whether `--wait` exists answered no — and anything reasoning from
+    # that, an agent especially, would correctly conclude it had to poll by hand,
+    # which is the thing `--wait` was added to stop. Documentation that
+    # contradicts the tool is worse than none, because it is believed.
+    #
+    # Conduit's additions print first, then the client's own list, so one command
+    # answers the whole question.
+    def extended_help(command : String, additions : String) : Int32
+      STDOUT.puts additions
+      STDOUT.puts
+      STDOUT.puts "The client's own options, forwarded untouched:"
+      STDOUT.puts
+      # Flushed because the client inherits this stdout and writes to it
+      # directly; buffered output would otherwise arrive after its help.
+      STDOUT.flush
+
+      guard { Client.from_config.exec([command, "--help"]) }
+    end
+
     # One place where every expected failure becomes a readable line and a
     # non-zero exit. Without it each command grows the same rescue clauses and
     # they drift, which shows up as one command reporting a missing client
