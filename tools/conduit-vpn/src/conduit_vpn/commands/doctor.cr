@@ -27,18 +27,26 @@ module ConduitVPN
       record Check, level : Level, name : String, detail : String
 
       def run(argv : Array(String)) : Int32
+        if argv.includes?("--explain")
+          STDOUT.puts Network.synthesis_explanation
+          return CLI::OK
+        end
+
         checks = [] of Check
 
         binary = ::ConduitVPN::Config.client_path
         home = ::ConduitVPN::Config.client_home
         client = Client.new(binary, home)
 
-        checks << check_binary(client, binary)
-        checks << check_home(client, home)
+        # Only these two gate the rest: without a usable binary and a usable
+        # home there is nothing to ask. Everything else reports independently,
+        # and a warning from any of them must not silence the checks below —
+        # which is exactly what gating on "every check passed" did.
+        preconditions = [check_binary(client, binary), check_home(client, home)]
+        checks.concat(preconditions)
+        checks << check_address_synthesis
 
-        # Only worth asking once the two preconditions hold; otherwise the
-        # failure is already explained and a second error adds noise.
-        if checks.all?(&.level.pass?)
+        if preconditions.all?(&.level.pass?)
           responds = check_responds(client)
           checks << responds
           checks << check_profiles(client) if responds.level.pass?
@@ -51,6 +59,22 @@ module ConduitVPN
         end
 
         checks.any?(&.level.fail?) ? CLI::FAILURE : CLI::OK
+      end
+
+      # Reported whether or not it is a problem, so this command's output has
+      # the same shape everywhere. A check that appears only when it fails is
+      # a check nobody knows exists until the day it does.
+      private def check_address_synthesis : Check
+        if Network.synthesizing_addresses?
+          Check.new(
+            Level::Warn,
+            "addressing",
+            "#{Network.summary} — connections will fail here; " \
+            "run `conduit-vpn doctor --explain` for why",
+          )
+        else
+          Check.new(Level::Pass, "addressing", Network.summary)
+        end
       end
 
       private def check_binary(client : Client, binary : Path) : Check

@@ -102,7 +102,20 @@ describe "doctor" do
 
       result = SpecHelper.run(sandbox, ["doctor"])
 
-      result.stdout.lines.size.should eq(4)
+      result.stdout.lines.size.should eq(5)
+    end
+  end
+
+  # A warning is not a reason to stop looking. Gating the client checks on
+  # "everything so far passed" meant an unrelated advisory silenced them.
+  it "keeps checking the client even when an advisory check warns" do
+    SpecHelper.sandbox do |sandbox|
+      sandbox.respond("list-profiles", %([{"profile-name": "Alpha"}]))
+
+      result = SpecHelper.run(sandbox, ["doctor"])
+
+      result.stdout.should contain("client responds")
+      result.stdout.should contain("1 installed")
     end
   end
 
@@ -114,8 +127,22 @@ describe "doctor" do
         {"CONDUIT_CLIENT_PATH" => "/nonexistent/aws-vpn-client"},
       )
 
-      result.stdout.lines.size.should eq(2)
+      result.stdout.should contain("FAIL")
+      result.stdout.should_not contain("client responds")
       sandbox.calls.should be_empty
+    end
+  end
+
+  describe "--explain" do
+    it "describes the address-translation failure and names the workaround" do
+      SpecHelper.sandbox do |sandbox|
+        result = SpecHelper.run(sandbox, ["doctor", "--explain"])
+
+        result.exit_code.should eq(0)
+        result.stdout.should contain("NAT64")
+        result.stdout.should contain("networksetup")
+        sandbox.calls.should be_empty
+      end
     end
   end
 end

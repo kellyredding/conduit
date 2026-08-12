@@ -71,6 +71,14 @@ module ConduitVPN
           STDERR.puts "connected to #{profile}"
         in .failed?
           STDERR.puts "#{profile} did not connect"
+          # Only asked after a failure. On this network the client tears down
+          # its own working tunnel and says so nowhere the caller can see, so
+          # a failure with no explanation is the expected outcome rather than
+          # a rare one.
+          if Network.synthesizing_addresses?
+            STDERR.puts
+            STDERR.puts Network.synthesis_explanation
+          end
         in .timed_out?
           # Deliberately not phrased as a failure. Sign-in happens in a
           # browser and may be waiting on a person, so giving up watching
