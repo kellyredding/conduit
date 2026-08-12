@@ -1,5 +1,11 @@
 import Foundation
 
+// Unbuffered, so a check that hangs still shows everything that passed before
+// it. Redirected into a pipe by the build, stdout would otherwise be block
+// buffered and a hang would surface as total silence — which says nothing
+// about where it stopped.
+setvbuf(stdout, nil, _IONBF, 0)
+
 // Isolate the settings before anything reads them. Without this the checks
 // resolve against whatever is in the real ~/.conduit/config.json and whatever
 // CONDUIT_* variables happen to be exported, so an assertion about a compiled
@@ -14,6 +20,7 @@ for name in [
     "CONDUIT_CLIENT_PATH", "CONDUIT_CLIENT_HOME", "CONDUIT_SENSITIVE_PATTERN",
     "CONDUIT_POLL_ACTIVE", "CONDUIT_POLL_IDLE", "CONDUIT_CONNECT_TIMEOUT",
     "CONDUIT_IDENTITY_HINT_AFTER", "CONDUIT_CONNECT_GRACE_POLLS",
+    "CONDUIT_RESTORE_ON_WAKE",
 ] {
     unsetenv(name)
 }
@@ -623,6 +630,157 @@ check(
         return ClientLogs.enforceCap(clientHome: hogHome, maxBytes: 0) == 0
     }()
 )
+
+// MARK: - Attempt watcher
+//
+// The whole reason this type exists is that the client's own exit code lies
+// about connection state, so every check here drives it against a scripted
+// sequence of readings rather than against a real client. Time is driven too:
+// a watcher that took real seconds to check would make the timeout case cost
+// two minutes, and nobody runs a gate that does that.
+
+/// Advances only when the watcher sleeps, so a two-minute timeout costs
+/// nothing and the same code path runs identically here and in the app.
+final class TestClock: AttemptClock, @unchecked Sendable {
+    private var elapsed: TimeInterval = 0
+    func now() -> TimeInterval { elapsed }
+    func sleep(_ seconds: TimeInterval) async { elapsed += seconds }
+}
+
+/// Yields the scripted readings in order, then repeats the last one forever —
+/// so a sequence that never reaches a terminal state models a client that has
+/// stopped making progress rather than one that ran out of answers.
+final class ScriptedProbe: @unchecked Sendable {
+    private let readings: [VPNStatus?]
+    private var index = 0
+    init(_ readings: [VPNStatus?]) { self.readings = readings }
+    func next() -> VPNStatus? {
+        defer { index += 1 }
+        return readings[min(index, readings.count - 1)]
+    }
+}
+
+/// Runs an async body from ordinary top-level code.
+///
+/// Keeps every top-level binding in this file a plain synchronous one. A single
+/// top-level `await` would turn all of them into async global initializers,
+/// which is a large change in how this file executes to buy nothing a checking
+/// tool needs. Blocking here is safe because the work is detached: it runs on
+/// the concurrency pool rather than on the thread waiting for it.
+///
+/// Whether top-level `await` would also have worked is untested — the run that
+/// suggested otherwise turned out to be a stale binary, because `make build`
+/// builds only the application scheme and this tool is built by `make smoke`.
+final class ResultBox<T>: @unchecked Sendable { var value: T? }
+
+func runAsync<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T {
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = ResultBox<T>()
+    Task.detached {
+        box.value = await body()
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value!
+}
+
+final class EventLog: @unchecked Sendable {
+    private(set) var events: [AttemptEvent] = []
+    func record(_ event: AttemptEvent) { events.append(event) }
+    var hints: Int { events.filter { $0 == .identityHint }.count }
+    var observations: Int {
+        events.filter { if case .observed = $0 { return true } else { return false } }
+            .count
+    }
+}
+
+func watchConnect(
+    _ readings: [VPNStatus?],
+    timeout: TimeInterval = 120,
+    hintAfter: TimeInterval = 5,
+    interval: TimeInterval = 2,
+    gracePolls: Int = 3
+) -> (AttemptOutcome, EventLog) {
+    let probe = ScriptedProbe(readings)
+    let log = EventLog()
+    let watcher = AttemptWatcher(probe: { probe.next() }, clock: TestClock())
+    let outcome = runAsync {
+        await watcher.watchConnect(
+            timeout: timeout,
+            hintAfter: hintAfter,
+            interval: interval,
+            gracePolls: gracePolls
+        ) { log.record($0) }
+    }
+    return (outcome, log)
+}
+
+let (reached, _) = watchConnect([.connecting, .waitingForIdentity, .connected])
+check("a connect that completes reads as connected", reached == .connected)
+
+// The asymmetry that makes this type necessary: NotConnected means both "idle"
+// and "what you just asked for failed", and only observed progress separates
+// them.
+let (afterProgress, _) = watchConnect([.connecting, .notConnected])
+check("dropping back to idle after progress is a failure", afterProgress == .failed)
+
+let (slowStart, _) = watchConnect(
+    [.notConnected, .notConnected, .connecting, .connected], gracePolls: 3
+)
+check(
+    "idle readings before any progress are tolerated, not failed",
+    slowStart == .connected
+)
+let (neverStarted, _) = watchConnect(
+    [.notConnected, .notConnected, .notConnected], gracePolls: 3
+)
+check("idle readings past the grace count are a failure", neverStarted == .failed)
+
+// A timeout must not share an outcome with a failure. Sign-in happens in a
+// browser, so giving up watching says nothing about whether the attempt will
+// eventually succeed, and anything treating them alike reports a loss on
+// something still in progress.
+let (gaveUp, _) = watchConnect([.connecting], timeout: 10, interval: 2)
+check("a watch that runs out of time is not a failure", gaveUp == .timedOut)
+check("and a timeout is distinguishable from one", !AttemptOutcome.timedOut.isFailure)
+
+let (_, hintLog) = watchConnect(
+    [.waitingForIdentity, .waitingForIdentity, .waitingForIdentity,
+     .waitingForIdentity, .waitingForIdentity, .connected],
+    hintAfter: 5, interval: 2
+)
+check("waiting on sign-in eventually says so", hintLog.hints == 1)
+check("and says it once, not once per poll", hintLog.hints < 2)
+
+let (_, quietLog) = watchConnect([.connecting, .connecting, .connecting, .connected])
+check(
+    "a status is reported when it changes, not when it is polled",
+    quietLog.observations == 2
+)
+
+// A client release that adds a state has not thereby broken the connection,
+// so an unrecognized reading counts as motion.
+let (unrecognized, _) = watchConnect([nil, nil, .connected], gracePolls: 3)
+check("an unrecognized status is motion rather than failure", unrecognized == .connected)
+let (unrecognizedThenIdle, _) = watchConnect([nil, .notConnected], gracePolls: 3)
+check(
+    "and having seen one, idle means the attempt failed",
+    unrecognizedThenIdle == .failed
+)
+
+let teardown = ScriptedProbe([.connected, .disconnecting, .notConnected])
+let teardownWatcher = AttemptWatcher(probe: { teardown.next() }, clock: TestClock())
+let torndown = runAsync {
+    await teardownWatcher.watchDisconnect(timeout: 30, interval: 2) { _ in }
+}
+check("a teardown that reaches idle reads as disconnected", torndown == .disconnected)
+
+let stuck = ScriptedProbe([.connected])
+let stuckWatcher = AttemptWatcher(probe: { stuck.next() }, clock: TestClock())
+let neverWent = runAsync {
+    await stuckWatcher.watchDisconnect(timeout: 10, interval: 2) { _ in }
+}
+check("a teardown that never lands times out", neverWent == .timedOut)
 
 // MARK: - Result
 

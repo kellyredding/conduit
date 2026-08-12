@@ -1,9 +1,16 @@
 import SwiftUI
 
-/// The dropdown. Read-only for now: every profile's state is shown and none of
-/// them can be changed from here.
+/// The dropdown: every profile's state, and the two things you can do about it.
 struct MenuContent: View {
     @ObservedObject var store: VPNStore
+
+    /// The profile whose confirmation is currently being asked for.
+    ///
+    /// Asked inline rather than in a sheet. This panel closes when it loses
+    /// focus, and anything presented over it inherits that — a confirmation
+    /// that can vanish mid-question is worse than none, because the answer it
+    /// was protecting is the one nobody should give by accident.
+    @State private var confirming: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -24,7 +31,19 @@ struct MenuContent: View {
                 ForEach(store.profiles, id: \.name) { profile in
                     ProfileRow(
                         profile: profile,
-                        counters: store.counters[profile.name]
+                        counters: store.counters[profile.name],
+                        note: store.notes[profile.name],
+                        isActing: store.isActing(on: profile.name),
+                        isConfirming: confirming == profile.name,
+                        onPrimary: { primaryAction(for: profile) },
+                        onConfirm: {
+                            confirming = nil
+                            store.connect(profile: profile.name, confirmed: true)
+                        },
+                        onDismissConfirm: { confirming = nil },
+                        onCancelAttempt: {
+                            store.cancelAttempt(profile: profile.name)
+                        }
                     )
                 }
             }
@@ -36,6 +55,20 @@ struct MenuContent: View {
         .frame(width: 320)
         .onAppear { store.menuOpened() }
         .onDisappear { store.menuClosed() }
+    }
+
+    /// A transitional profile disconnects rather than connects, because that is
+    /// the only thing that reaches it: while an attempt is held, the client
+    /// refuses a new one and says the profile is already connected. Offering
+    /// Connect there would present the one action guaranteed to be refused.
+    private func primaryAction(for profile: ProfileState) {
+        if profile.isConnected || profile.isInFlight {
+            store.disconnect(profile: profile.name)
+        } else if profile.isSensitive {
+            confirming = profile.name
+        } else {
+            store.connect(profile: profile.name, confirmed: false)
+        }
     }
 
     private func banner(_ reason: String) -> some View {
@@ -101,46 +134,119 @@ private let rowMarkSize: CGFloat = 22
 private struct ProfileRow: View {
     let profile: ProfileState
     let counters: VPNByteCounters?
+    let note: String?
+    let isActing: Bool
+    let isConfirming: Bool
+    let onPrimary: () -> Void
+    let onConfirm: () -> Void
+    let onDismissConfirm: () -> Void
+    let onCancelAttempt: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: indicator)
-                .font(.system(size: rowMarkSize, weight: .regular))
-                .foregroundStyle(profile.isConnected ? .primary : .tertiary)
-                .frame(width: rowMarkSize + 2)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: indicator)
+                    .font(.system(size: rowMarkSize, weight: .regular))
+                    .foregroundStyle(profile.isConnected ? .primary : .tertiary)
+                    .frame(width: rowMarkSize + 2)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(profile.name)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(profile.name)
 
-                // Throughput sits with the status rather than off to the right,
-                // which leaves the trailing edge free for the mark and stops
-                // the two competing for the same space on a connected row.
-                HStack(spacing: 6) {
-                    Text(profile.label)
-                    if let counters {
-                        Text(traffic(counters))
-                            .monospacedDigit()
-                            .foregroundStyle(.tertiary)
+                    // Throughput sits with the status rather than off to the
+                    // right, which leaves the trailing edge free for the mark
+                    // and stops the two competing for the same space on a
+                    // connected row.
+                    HStack(spacing: 6) {
+                        Text(profile.label)
+                        if let counters {
+                            Text(traffic(counters))
+                                .monospacedDigit()
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    // Kept on its own line rather than replacing the status.
+                    // What the client reports and what Conduit has to say about
+                    // it are different claims, and a browser waiting for a
+                    // sign-in is not a substitute for knowing the tunnel is
+                    // still down.
+                    if let note {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+
+                Spacer(minLength: 8)
+
+                if profile.isSensitive {
+                    // Sized to the whole row rather than to the name it
+                    // follows. This is the one piece of information here that
+                    // changes what a person is allowed to do without thinking,
+                    // so it is the one thing that should be legible before the
+                    // row is read.
+                    Image(systemName: sensitiveSymbol)
+                        .font(.system(size: rowMarkSize, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .help("Needs confirmation before connecting")
+                }
+
+                action
             }
 
-            Spacer(minLength: 8)
-
-            if profile.isSensitive {
-                // Sized to the whole row rather than to the name it follows.
-                // This is the one piece of information here that changes what
-                // a person is allowed to do without thinking, so it is the one
-                // thing that should be legible before the row is read.
-                Image(systemName: sensitiveSymbol)
-                    .font(.system(size: rowMarkSize, weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .help("Needs confirmation before connecting")
-            }
+            if isConfirming { confirmation }
         }
         .padding(.vertical, 8)
+    }
+
+    /// While Conduit is driving an attempt the only thing offered is stopping
+    /// it. Starting a second one is not a thing the client can honour, and a
+    /// button that exists to be refused teaches people to distrust the panel.
+    @ViewBuilder private var action: some View {
+        if isActing {
+            Button("Cancel", action: onCancelAttempt)
+                .controlSize(.small)
+        } else if isConfirming {
+            // The prompt below carries its own buttons; a third one up here
+            // would leave two Connects on screen meaning different things.
+            EmptyView()
+        } else {
+            Button(actionLabel, action: onPrimary)
+                .controlSize(.small)
+        }
+    }
+
+    private var actionLabel: String {
+        profile.isConnected || profile.isInFlight ? "Disconnect" : "Connect"
+    }
+
+    /// Names the profile rather than saying "this one". The whole purpose of
+    /// the question is to make the answer specific, and a confirmation that
+    /// does not say what it is confirming is a button that gets pressed.
+    private var confirmation: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Connect to \(profile.name)?")
+                .font(.callout)
+                .fontWeight(.medium)
+            Text("This profile is marked as needing confirmation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button("Connect", action: onConfirm)
+                    .controlSize(.small)
+                    .keyboardShortcut(.defaultAction)
+                Button("Cancel", action: onDismissConfirm)
+                    .controlSize(.small)
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
     }
 
     // A dashed empty ring, then the bolt inside a ring, then the bolt inside

@@ -336,6 +336,160 @@ final class VPNStore: ObservableObject {
         }
     }
 
+    // MARK: - Actions
+
+    /// What an attempt has to say for itself beyond its status: the browser
+    /// hint while it waits, or why it ended if it ended badly. Keyed by
+    /// profile because several can be in flight at once.
+    @Published private(set) var notes: [String: String] = [:]
+
+    /// Which profiles have a cancellable attempt running.
+    ///
+    /// Published, and deliberately not derived from the task table: a view
+    /// asking the table directly would read the right answer and never be told
+    /// to look again, since a dictionary of tasks publishes nothing. It worked
+    /// only because a published set happened to change at the same instant,
+    /// and the restore path already breaks that correspondence — it marks a
+    /// profile active without owning a task to cancel.
+    @Published private(set) var attemptsInProgress: Set<String> = []
+
+    private var attemptTasks: [String: Task<Void, Never>] = [:]
+
+    func isActing(on profile: String) -> Bool {
+        attemptsInProgress.contains(profile)
+    }
+
+    /// Refused for a profile the rule marks unless the caller says it has
+    /// asked. The gate lives here rather than only in the panel so that a
+    /// second caller cannot reach a sensitive endpoint by not knowing about it
+    /// — the same reason the command line refuses without a confirming flag.
+    func connect(profile name: String, confirmed: Bool) {
+        guard attemptTasks[name] == nil else { return }
+        guard confirmed || !Sensitivity.isSensitive(name) else {
+            notes[name] = "Needs confirmation"
+            return
+        }
+
+        notes[name] = nil
+        activeAttempts.insert(name)
+        attemptsInProgress.insert(name)
+        attemptTasks[name] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishAttempt(name) }
+
+            // One tunnel at a time. Asking for a second while one is live
+            // fails, and being told to go and disconnect the first by hand is
+            // a step with no decision in it.
+            await self.client.releaseOthers(except: name)
+
+            do {
+                try await self.client.connect(profile: name)
+            } catch {
+                // The client refuses outright when the profile is already held
+                // by an attempt of its own, which is a sentence rather than a
+                // state and is worth showing verbatim.
+                self.notes[name] = Self.describe(error)
+                return
+            }
+
+            let outcome = await self.watcher(for: name).watchConnect(
+                timeout: Self.number("connect-timeout", 120),
+                hintAfter: Self.number("identity-hint-after", 15),
+                interval: Self.number("poll-interval-active", 2),
+                gracePolls: ConduitConfig.int("connect-grace-polls") ?? 3,
+                onEvent: self.forward(to: name)
+            )
+
+            switch outcome {
+            case .connected, .disconnected:
+                self.notes[name] = nil
+            case .failed:
+                self.notes[name] = "Could not connect"
+            case .timedOut:
+                // Not a failure. Sign-in happens in a browser, so giving up
+                // watching says nothing about whether it will still land, and
+                // wording it as a loss would be a guess.
+                self.notes[name] = "Still trying — stopped watching"
+            case .cancelled:
+                await self.release(name)
+            }
+        }
+    }
+
+    func disconnect(profile name: String) {
+        guard attemptTasks[name] == nil else { return }
+
+        notes[name] = nil
+        activeAttempts.insert(name)
+        attemptsInProgress.insert(name)
+        attemptTasks[name] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.finishAttempt(name) }
+
+            do {
+                try await self.client.disconnect(profile: name)
+            } catch {
+                self.notes[name] = Self.describe(error)
+                return
+            }
+
+            let outcome = await self.watcher(for: name).watchDisconnect(
+                timeout: Self.number("connect-timeout", 120),
+                interval: Self.number("poll-interval-active", 2),
+                onEvent: self.forward(to: name)
+            )
+            if outcome == .timedOut { self.notes[name] = "Still tearing down" }
+        }
+    }
+
+    /// Stopping the watch is not stopping the attempt: the client carries on,
+    /// and a profile left mid-attempt holds itself against any replacement for
+    /// about ten minutes while reporting that it is already connected. So a
+    /// cancel that only stopped watching would leave the profile unusable and
+    /// look like it had been dealt with. The release is the cancel.
+    func cancelAttempt(profile name: String) {
+        attemptTasks[name]?.cancel()
+    }
+
+    private func release(_ name: String) async {
+        try? await client.disconnect(profile: name)
+        notes[name] = nil
+    }
+
+    private func finishAttempt(_ name: String) {
+        activeAttempts.remove(name)
+        attemptsInProgress.remove(name)
+        attemptTasks[name] = nil
+        refreshNow()
+    }
+
+    /// The watcher runs outside this actor, so its events are hopped back
+    /// rather than assumed to arrive here.
+    private func forward(to name: String) -> @Sendable (AttemptEvent) async -> Void {
+        { [weak self] event in
+            guard case .identityHint = event else { return }
+            await MainActor.run {
+                self?.notes[name] = "Waiting for browser sign-in"
+            }
+        }
+    }
+
+    private func watcher(for name: String) -> AttemptWatcher {
+        let client = self.client
+        return AttemptWatcher(probe: {
+            try? await client.status(profile: name).status
+        })
+    }
+
+    private static func number(_ key: String, _ fallback: TimeInterval) -> TimeInterval {
+        let configured = ConduitConfig.seconds(key)
+        return configured > 0 ? configured : fallback
+    }
+
+    private static func describe(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
     // MARK: - Triggers
 
     /// The last moment the pre-sleep truth is still observable. Taken from the
@@ -495,6 +649,12 @@ final class VPNStore: ObservableObject {
         for name in restoreWanted.sorted() {
             activeAttempts.insert(name)
             defer { activeAttempts.remove(name) }
+
+            // Exclusive here too, so a restore cannot be the one path that
+            // leaves two tunnels up. In practice this releases nothing: only
+            // one profile can be connected, so only one can have been
+            // remembered.
+            await client.releaseOthers(except: name)
 
             // Release first. A stalled attempt holds the profile against any
             // replacement, and this is the only thing that clears it. Harmless
