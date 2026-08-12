@@ -90,11 +90,11 @@ struct TunnelRoute: Equatable, Sendable, Identifiable {
 struct DNSResolver: Equatable, Sendable, Identifiable {
     /// The interface the OS scoped this resolver to, or nil when it named none.
     let interface: String?
-    let nameservers: [String]
+    var nameservers: [Nameserver]
     let searchDomains: [String]
 
     var id: String {
-        "\(interface ?? "-")|\(nameservers.joined(separator: ","))"
+        "\(interface ?? "-")|\(nameservers.map(\.address).joined(separator: ","))"
     }
 
     /// Bound to a tunnel interface — the one case where the OS itself ties a
@@ -106,6 +106,48 @@ struct DNSResolver: Equatable, Sendable, Identifiable {
 
     var scopeDescription: String {
         interface ?? "not scoped to an interface"
+    }
+}
+
+/// One address a resolver answers on, and the path packets to it would take.
+///
+/// Per nameserver rather than per resolver because a resolver can list several,
+/// and nothing requires them to sit on the same network. Attaching one answer to
+/// the whole resolver would be right almost always, and "almost always" is how a
+/// confident wrong claim gets made.
+struct Nameserver: Equatable, Sendable, Identifiable {
+    let address: String
+
+    /// The interface the kernel says it would send traffic to this address
+    /// through, or nil when it could not be determined.
+    ///
+    /// **Asked of the routing table rather than computed.** The alternative was
+    /// to expand the routing table's abbreviated destinations into prefixes and
+    /// match against them, which fails in a way worth spelling out: a correct
+    /// answer needs the longest matching prefix across *every* interface, so a
+    /// comparison against tunnel routes alone would claim the tunnel for an
+    /// address a more specific route on the physical interface actually owns. The
+    /// kernel already does that arithmetic, including scoped routes and whatever
+    /// else it weighs, and asking it also removes an inference about what an
+    /// abbreviated destination means.
+    ///
+    /// A point-in-time reading: it changes the moment a tunnel goes up or down,
+    /// which is why it is refreshed on the same events as the rest of these
+    /// facts and never carried across a connection change.
+    var reachedThrough: String?
+
+    var id: String { address }
+
+    /// Whether traffic to this address leaves through a tunnel.
+    ///
+    /// This is a statement about the packet path and nothing more. It does not
+    /// say that this resolver serves internal names, that split DNS is working,
+    /// or that the OS will choose this resolver for any particular name —
+    /// resolver selection runs on scoping and search domains, which this cannot
+    /// see.
+    var isReachedThroughTunnel: Bool {
+        guard let reachedThrough else { return false }
+        return TunnelFactsParser.isTunnel(reachedThrough)
     }
 }
 
@@ -178,7 +220,7 @@ enum TunnelFactsParser {
     /// with".
     static func resolvers(fromScutil text: String) -> [DNSResolver] {
         var found: [DNSResolver] = []
-        var nameservers: [String] = []
+        var nameservers: [Nameserver] = []
         var searchDomains: [String] = []
         var interface: String?
         var inBlock = false
@@ -221,7 +263,7 @@ enum TunnelFactsParser {
             // prefix is matched and the index ignored: order in the file is the
             // order they are used in, which is what the array preserves.
             if key.hasPrefix("nameserver") {
-                nameservers.append(value)
+                nameservers.append(Nameserver(address: value))
             } else if key.hasPrefix("search domain") {
                 searchDomains.append(value)
             } else if key == "if_index" {
@@ -231,6 +273,37 @@ enum TunnelFactsParser {
 
         if inBlock { flush() }
         return found
+    }
+
+    // MARK: - Which interface reaches an address
+
+    /// The interface from `route -n get`, which is the kernel's own answer to
+    /// "where would traffic to this address go".
+    ///
+    /// Measured shape, both address families:
+    ///
+    ///        route to: <address>
+    ///     destination: default
+    ///       interface: en0
+    ///           flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+    ///
+    /// Only the interface line is read. Everything else in that output is either
+    /// an address — which must not be stored — or routing detail this has no use
+    /// for, and reading one labelled line is also what lets the check exercise
+    /// this against a fixture carrying no address at all.
+    static func interfaceName(fromRouteGet text: String) -> String? {
+        let label = "interface:"
+        for rawLine in text.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix(label) else { continue }
+            let value = line.dropFirst(label.count)
+                .trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : value
+        }
+        // No interface line at all: the address is unroutable, or the command
+        // failed in a way that still produced output. Either way the honest
+        // answer is that the path is unknown, never that it is the default.
+        return nil
     }
 
     /// `if_index` reads as `14 (en0)`, measured. The name in parentheses is the

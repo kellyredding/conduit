@@ -1163,7 +1163,16 @@ check("a tunnel-scoped resolver is recognized as one", tunnelScoped.count == 1)
 check("the interface comes from if_index", tunnelScoped.first?.interface == "utun4")
 check(
     "nameservers keep the order they are used in",
-    tunnelScoped.first?.nameservers == ["ns-tunnel-first", "ns-tunnel-second"]
+    tunnelScoped.first?.nameservers.map(\.address)
+        == ["ns-tunnel-first", "ns-tunnel-second"]
+)
+check(
+    "a freshly parsed nameserver claims no path until one is looked up",
+    tunnelScoped.first?.nameservers.allSatisfy { $0.reachedThrough == nil } == true
+)
+check(
+    "and an unknown path is not a tunnel path",
+    tunnelScoped.first?.nameservers.allSatisfy { !$0.isReachedThroughTunnel } == true
 )
 check(
     "search domains are collected",
@@ -1197,6 +1206,55 @@ let duplicated = """
 check(
     "an identical resolver in both sections is one resolver",
     TunnelFactsParser.resolvers(fromScutil: duplicated).count == 1
+)
+
+// MARK: - Which interface reaches an address
+//
+// The kernel is asked rather than the routing table re-implemented. Computing it
+// here would need the longest matching prefix across every interface, so a
+// comparison against tunnel routes alone would claim the tunnel for an address a
+// more specific route elsewhere actually owns — and it would rest on an inference
+// about what an abbreviated destination means.
+//
+// It also makes this testable at all: only the interface line is read, so the
+// fixture needs no address, and the disclosure audit stays untouched.
+
+let routeToTunnel = """
+       route to: <an address>
+    destination: dest-one
+           mask: a-mask
+        gateway: gateway-b
+      interface: utun4
+          flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+     recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+            0         0         0         0         0         0      1500         0
+    """
+check(
+    "the interface is taken from the line that names it",
+    TunnelFactsParser.interfaceName(fromRouteGet: routeToTunnel) == "utun4"
+)
+check(
+    "and a tunnel path is recognized as one",
+    Nameserver(address: "ns-tunnel", reachedThrough: "utun4").isReachedThroughTunnel
+)
+check(
+    "while the physical interface is not",
+    !Nameserver(address: "ns-wired", reachedThrough: "en0").isReachedThroughTunnel
+)
+
+// An address the kernel will not route produces output with no interface line.
+// Reading that as the default route would be the confident wrong answer this
+// whole approach exists to avoid.
+check(
+    "output with no interface line yields no path",
+    TunnelFactsParser.interfaceName(
+        fromRouteGet: "   route to: <an address>\n"
+            + "route: writing to routing socket: not in table\n"
+    ) == nil
+)
+check(
+    "and neither does empty output",
+    TunnelFactsParser.interfaceName(fromRouteGet: "") == nil
 )
 
 check(

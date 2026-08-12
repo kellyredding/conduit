@@ -21,6 +21,7 @@ actor SystemProbe {
     /// as a login item.
     private static let netstat = URL(fileURLWithPath: "/usr/sbin/netstat")
     private static let scutil = URL(fileURLWithPath: "/usr/sbin/scutil")
+    private static let route = URL(fileURLWithPath: "/sbin/route")
 
     /// Short by design. These are local queries against kernel state; one that
     /// has not answered in five seconds is not going to.
@@ -36,9 +37,55 @@ actor SystemProbe {
 
         return TunnelFacts(
             routes: await routes,
-            resolvers: await resolvers,
+            resolvers: await attachReach(to: await resolvers),
             readAt: now
         )
+    }
+
+    /// Fills in which interface reaches each nameserver.
+    ///
+    /// One query per *distinct* address rather than per resolver entry: the same
+    /// nameserver is routinely listed several times — once unscoped and again
+    /// scoped to an interface — and the routing answer cannot differ between
+    /// those listings, since it depends on the address alone.
+    ///
+    /// Sequential on purpose. The count is bounded by how many resolvers the
+    /// machine has, which is single digits, and these are routing-socket lookups
+    /// rather than network round-trips.
+    private func attachReach(to resolvers: [DNSResolver]) async -> [DNSResolver] {
+        let addresses = Set(resolvers.flatMap { $0.nameservers.map(\.address) })
+        var reach: [String: String] = [:]
+        for address in addresses.sorted() {
+            if let interface = await self.interface(reaching: address) {
+                reach[address] = interface
+            }
+        }
+
+        return resolvers.map { resolver in
+            var updated = resolver
+            for index in updated.nameservers.indices {
+                updated.nameservers[index].reachedThrough =
+                    reach[updated.nameservers[index].address]
+            }
+            return updated
+        }
+    }
+
+    /// The kernel's own answer to where traffic to `address` would go.
+    ///
+    /// The address is passed as its own argument rather than interpolated into a
+    /// command line — there is no shell here — so text taken from the resolver
+    /// configuration cannot become anything but one argument.
+    ///
+    /// The address family has to be named for IPv6 or the lookup fails; both
+    /// forms were verified against the live routing table.
+    func interface(reaching address: String) async -> String? {
+        var arguments = ["-n", "get"]
+        if address.contains(":") { arguments.append("-inet6") }
+        arguments.append(address)
+
+        guard let text = await capture(Self.route, arguments) else { return nil }
+        return TunnelFactsParser.interfaceName(fromRouteGet: text)
     }
 
     private func routes() async -> [TunnelRoute] {

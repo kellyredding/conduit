@@ -210,7 +210,9 @@ struct DetailView: View {
                     """
                     In the order the operating system reports them. Scope is what \
                     it reports too: nothing ties an unscoped resolver to a tunnel, \
-                    either way.
+                    either way. "via" is the interface the kernel would send \
+                    queries through — a packet path, not a statement about which \
+                    resolver gets used for a given name.
                     """
                 )
                 .font(.caption)
@@ -242,12 +244,36 @@ struct DetailView: View {
                 }
             }
 
-            ForEach(resolver.nameservers, id: \.self) { nameserver in
-                Text(nameserver)
-                    .font(.system(size: 11))
-                    .monospaced()
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+            ForEach(resolver.nameservers) { nameserver in
+                HStack(spacing: 8) {
+                    Text(nameserver.address)
+                        .font(.system(size: 11))
+                        .monospaced()
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+
+                    // Shown for either answer, because "these queries do not go
+                    // through the tunnel" is as much of an answer as the
+                    // reverse, and only stated at all when the kernel gave one.
+                    if let reach = nameserver.reachedThrough {
+                        Text("via \(reach)")
+                            .font(.system(size: 9, weight: .semibold))
+                            .monospaced()
+                            .foregroundStyle(
+                                nameserver.isReachedThroughTunnel
+                                    ? .primary : .secondary
+                            )
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                nameserver.isReachedThroughTunnel
+                                    ? AnyShapeStyle(.tertiary)
+                                    : AnyShapeStyle(.quinary),
+                                in: Capsule()
+                            )
+                    }
+                    Spacer(minLength: 0)
+                }
             }
 
             if !resolver.searchDomains.isEmpty {
