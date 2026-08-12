@@ -121,6 +121,29 @@ actor VPNClient {
         _ = try await capture(["disconnect", "--profile-name", profile])
     }
 
+    /// Leaves the named profile as the only one the client is holding.
+    ///
+    /// MIRROR (behavioral): the same release runs in the command line's own
+    /// connect, so a tunnel started from a terminal and one started from the
+    /// menu behave identically. Divergence here would make the rule depend on
+    /// which surface someone happened to use.
+    ///
+    /// The client permits several concurrent tunnels and this deployment is
+    /// not routed for them: asking for a second while one is live simply
+    /// fails. The target is deliberately untouched — releasing it as well
+    /// would tear down a working tunnel to rebuild it identically.
+    ///
+    /// Failures are swallowed per profile rather than aborting. Each is a
+    /// separate connection, one refusing says nothing about the others, and
+    /// the connect that follows fails loudly enough on its own if a release
+    /// was the reason it could not proceed.
+    func releaseOthers(except profile: String) async {
+        guard let listed = try? await listConnections() else { return }
+        for connection in listed where connection.name != profile {
+            try? await disconnect(profile: connection.name)
+        }
+    }
+
     // MARK: - Invocation
 
     func capture(_ arguments: [String]) async throws -> Data {

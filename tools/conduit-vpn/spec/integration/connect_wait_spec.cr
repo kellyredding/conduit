@@ -8,16 +8,104 @@ private def no_waiting : Hash(String, String?)
 end
 
 describe "connect" do
-  it "behaves as the client does when --wait is absent" do
+  it "reports what the client reported when --wait is absent" do
     SpecHelper.sandbox do |sandbox|
+      sandbox.respond("list-connections", "[]")
       sandbox.respond("connect", %({"status": "WaitingForIdentity"}))
 
       result = SpecHelper.run(sandbox, ["connect", "--profile-name", "Alpha"])
 
       result.exit_code.should eq(0)
       result.stdout.should contain("WaitingForIdentity")
-      # One call and no polling: the client's own behavior, unchanged.
-      sandbox.calls.size.should eq(1)
+      # The listing that enforces one-at-a-time, then the attempt. Still no
+      # polling: without --wait what gets reported is the client's own answer.
+      sandbox.calls.size.should eq(2)
+    end
+  end
+end
+
+# One tunnel at a time. The client permits several and this deployment is not
+# routed for them, so asking for a second while one is live simply fails —
+# and being told to go and disconnect the first by hand is a step with no
+# decision in it.
+describe "connect exclusivity" do
+  it "releases another live profile before starting the attempt" do
+    SpecHelper.sandbox do |sandbox|
+      sandbox.respond(
+        "list-connections",
+        %([{"profile-name": "Bravo", "initiated-by": "someone",
+            "connection-status": "Connected",
+            "last-updated-at": "2026-01-01T00:00:00-05:00"}])
+      )
+      sandbox.respond("connect", %({"status": "WaitingForIdentity"}))
+
+      result = SpecHelper.run(sandbox, ["connect", "--profile-name", "Alpha"])
+
+      result.exit_code.should eq(0)
+      result.stderr.should contain("disconnecting Bravo")
+
+      released = sandbox.calls.index(&.includes?("disconnect"))
+      attempted = sandbox.calls.index(&.includes?("connect --profile-name Alpha"))
+      released.should_not be_nil
+      attempted.should_not be_nil
+      # Ordering is the whole point: releasing after the attempt would tear
+      # down the tunnel just asked for.
+      (released.not_nil! < attempted.not_nil!).should be_true
+    end
+  end
+
+  # Tearing down a working tunnel to rebuild it identically would be a
+  # surprising thing for a repeated command to do, so the client's own
+  # "already connected" answer stays the answer.
+  it "leaves the target alone when it is the one already connected" do
+    SpecHelper.sandbox do |sandbox|
+      sandbox.respond(
+        "list-connections",
+        %([{"profile-name": "Alpha", "initiated-by": "someone",
+            "connection-status": "Connected",
+            "last-updated-at": "2026-01-01T00:00:00-05:00"}])
+      )
+      sandbox.respond("connect", %({"status": "WaitingForIdentity"}))
+
+      SpecHelper.run(sandbox, ["connect", "--profile-name", "Alpha"])
+
+      sandbox.calls.any?(&.includes?("disconnect")).should be_false
+    end
+  end
+
+  it "also releases a profile that is merely holding an attempt" do
+    SpecHelper.sandbox do |sandbox|
+      sandbox.respond(
+        "list-connections",
+        %([{"profile-name": "Bravo", "initiated-by": "someone",
+            "connection-status": "WaitingForIdentity",
+            "last-updated-at": "2026-01-01T00:00:00-05:00"}])
+      )
+      sandbox.respond("connect", %({"status": "WaitingForIdentity"}))
+
+      SpecHelper.run(sandbox, ["connect", "--profile-name", "Alpha"])
+
+      sandbox.calls.any? { |call|
+        call.includes?("disconnect") && call.includes?("Bravo")
+      }.should be_true
+    end
+  end
+
+  # Exclusivity is a convenience on top of the thing actually being asked for.
+  # Refusing to connect at all because the tidying step failed would trade a
+  # working command for a housekeeping rule.
+  it "still connects when the listing cannot be read" do
+    SpecHelper.sandbox do |sandbox|
+      sandbox.respond("connect", %({"status": "WaitingForIdentity"}))
+
+      result = SpecHelper.run(
+        sandbox,
+        ["connect", "--profile-name", "Alpha"],
+        {"FAKE_VPN_EXIT_LIST_CONNECTIONS" => "1"} of String => String?
+      )
+
+      result.exit_code.should eq(0)
+      result.stdout.should contain("WaitingForIdentity")
     end
   end
 end

@@ -18,8 +18,12 @@ module ConduitVPN
 
           client = Client.from_config
 
+          # One tunnel at a time, whoever asked.
+          release_others(client, profile) if profile
+
           # Without --wait the behavior is the client's own: start the attempt
-          # and report what it said. The guard above is the only difference.
+          # and report what it said. The guard above and the release below are
+          # the only differences.
           next client.exec(flags.forward) unless flags.wait
 
           unless profile
@@ -28,6 +32,49 @@ module ConduitVPN
           end
 
           watch(client, profile, flags.forward)
+        end
+      end
+
+      # Leaves the named profile as the only one the client is holding.
+      #
+      # The client permits several concurrent tunnels and this deployment is
+      # not routed for them: asking for a second while one is live simply
+      # fails, with a message that describes a limit rather than the choice
+      # behind it. Nobody wants two, and being told to go and disconnect the
+      # first one by hand is a step with no decision in it.
+      #
+      # Deliberately not a prompt. Whoever is asking can already see which
+      # profile is live and is asking for a different one, so a confirmation
+      # would only ask them to repeat themselves.
+      #
+      # The target is left alone. If it is the one already connected, the
+      # client's own "already connected" answer is still the right one, and
+      # tearing down a working tunnel to rebuild it identically would be a
+      # surprising thing for a repeated command to do.
+      private def release_others(client : Client, profile : String) : Nil
+        # A listing that cannot be read must not cost the caller their connect.
+        # Exclusivity is a convenience on top of the thing actually being asked
+        # for, and refusing to connect at all because the tidying step failed
+        # would trade a working command for a housekeeping rule.
+        listed = begin
+          Models.connections(client.capture(["list-connections"]))
+        rescue error
+          STDERR.puts "  could not check for other connections: #{error.message}"
+          return
+        end
+
+        listed.each do |connection|
+          next if connection.name == profile
+
+          STDERR.puts "  disconnecting #{connection.name}"
+          begin
+            client.capture(["disconnect", "--profile-name", connection.name])
+          rescue error : Client::CommandFailed
+            # Reported rather than raised. The connect that follows is the
+            # thing being asked for, and it will fail loudly enough on its own
+            # if this release was the reason it could not proceed.
+            STDERR.puts "  could not disconnect #{connection.name}: #{error.message}"
+          end
         end
       end
 

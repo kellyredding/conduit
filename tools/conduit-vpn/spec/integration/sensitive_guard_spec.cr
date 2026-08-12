@@ -25,7 +25,8 @@ describe "the sensitive-profile guard" do
       )
 
       result.exit_code.should eq(0)
-      sandbox.calls.size.should eq(1)
+      # The listing that enforces one-at-a-time, then the attempt.
+      sandbox.calls.size.should eq(2)
     end
   end
 
@@ -35,7 +36,12 @@ describe "the sensitive-profile guard" do
 
       SpecHelper.run(sandbox, ["connect", "--profile-name", "Prod-Alpha", "--yes"])
 
-      sandbox.calls.first.should end_with("ARGS=connect --profile-name Prod-Alpha")
+      # Asserted against the attempt itself rather than the first call, which
+      # is now the exclusivity listing. --yes is Conduit's own flag and the
+      # client would reject it.
+      attempt = sandbox.calls.find(&.includes?("ARGS=connect"))
+      attempt.should_not be_nil
+      attempt.not_nil!.should end_with("ARGS=connect --profile-name Prod-Alpha")
     end
   end
 
@@ -46,7 +52,7 @@ describe "the sensitive-profile guard" do
       result = SpecHelper.run(sandbox, ["connect", "--profile-name", "Alpha"])
 
       result.exit_code.should eq(0)
-      sandbox.calls.size.should eq(1)
+      sandbox.calls.size.should eq(2)
     end
   end
 
