@@ -156,6 +156,8 @@ let expectedKeys = [
     "poll-interval-idle",
     "connect-timeout",
     "identity-hint-after",
+    "log-retention-days",
+    "log-max-megabytes",
     "connect-grace-polls",
 ]
 
@@ -461,6 +463,124 @@ case .failure(let error):
           return false }()
     )
 }
+
+// MARK: - Log housekeeping
+//
+// The only thing in this application that deletes a file, so the checks are
+// about what it leaves alone as much as what it removes.
+
+let logHome = fixtureRoot.appendingPathComponent("log-home")
+let logDir = ClientLogs.directory(clientHome: logHome)
+try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+
+func writeLog(_ name: String, daysOld: Int) {
+    let url = logDir.appendingPathComponent(name)
+    FileManager.default.createFile(atPath: url.path, contents: Data("x".utf8))
+    let when = Date().addingTimeInterval(-Double(daysOld) * 86_400)
+    try? FileManager.default.setAttributes([.modificationDate: when], ofItemAtPath: url.path)
+}
+
+writeLog("aws_vpn_client_cli_20260101.log", daysOld: 30)
+writeLog("aws_vpn_client_cli_20260210.log", daysOld: 10)
+writeLog("aws_vpn_client_cli_20260811.log", daysOld: 0)
+writeLog("something-else.txt", daysOld: 30)
+writeLog("notes.log", daysOld: 30)
+
+let removed = ClientLogs.prune(clientHome: logHome, retainingDays: 3)
+check("old client logs are removed", removed == 2)
+check(
+    "today's log survives",
+    FileManager.default.fileExists(
+        atPath: logDir.appendingPathComponent("aws_vpn_client_cli_20260811.log").path)
+)
+// This runs unattended at every launch. A loop that trusts its directory
+// rather than the file name is one misconfigured path from being a problem.
+check(
+    "a file that is not a client log is left alone even when old",
+    FileManager.default.fileExists(
+        atPath: logDir.appendingPathComponent("something-else.txt").path)
+        && FileManager.default.fileExists(
+            atPath: logDir.appendingPathComponent("notes.log").path)
+)
+check("pruning again removes nothing", ClientLogs.prune(clientHome: logHome, retainingDays: 3) == 0)
+check(
+    "a missing log directory is not an error",
+    ClientLogs.prune(
+        clientHome: fixtureRoot.appendingPathComponent("no-such-home"),
+        retainingDays: 3
+    ) == 0
+)
+check("footprint counts only client logs", ClientLogs.footprint(clientHome: logHome) == 1)
+check(
+    "zero retention still keeps today's",
+    {
+        _ = ClientLogs.prune(clientHome: logHome, retainingDays: 0)
+        return FileManager.default.fileExists(
+            atPath: logDir.appendingPathComponent("aws_vpn_client_cli_20260811.log").path)
+    }()
+)
+
+// Retention removes whole days; it cannot bound a single day that goes chatty.
+// These check the backstop that does not care why.
+
+let capHome = fixtureRoot.appendingPathComponent("cap-home")
+let capDir = ClientLogs.directory(clientHome: capHome)
+try? FileManager.default.createDirectory(at: capDir, withIntermediateDirectories: true)
+
+func writeSized(_ name: String, kb: Int, daysOld: Int) {
+    let url = capDir.appendingPathComponent(name)
+    FileManager.default.createFile(
+        atPath: url.path, contents: Data(count: kb * 1024))
+    let when = Date().addingTimeInterval(-Double(daysOld) * 86_400)
+    try? FileManager.default.setAttributes(
+        [.modificationDate: when], ofItemAtPath: url.path)
+}
+
+writeSized("aws_vpn_client_cli_20260808.log", kb: 400, daysOld: 3)
+writeSized("aws_vpn_client_cli_20260809.log", kb: 400, daysOld: 2)
+writeSized("aws_vpn_client_cli_20260810.log", kb: 400, daysOld: 1)
+writeSized("aws_vpn_client_cli_20260811.log", kb: 400, daysOld: 0)
+
+// 1600 KB total, capped at 1 MB: the two oldest go, the newest survives.
+let capped = ClientLogs.enforceCap(clientHome: capHome, maxBytes: 1_048_576)
+check("the cap removes files until the total fits", capped == 2)
+check(
+    "the oldest go first",
+    !FileManager.default.fileExists(
+        atPath: capDir.appendingPathComponent("aws_vpn_client_cli_20260808.log").path)
+        && FileManager.default.fileExists(
+            atPath: capDir.appendingPathComponent("aws_vpn_client_cli_20260811.log").path)
+)
+check(
+    "and it actually got under the ceiling",
+    ClientLogs.footprint(clientHome: capHome) <= 1_048_576
+)
+check(
+    "a directory already under the ceiling is left alone",
+    ClientLogs.enforceCap(clientHome: capHome, maxBytes: 10_485_760) == 0
+)
+
+// The case retention cannot reach: one day, too big on its own.
+let hogHome = fixtureRoot.appendingPathComponent("hog-home")
+let hogDir = ClientLogs.directory(clientHome: hogHome)
+try? FileManager.default.createDirectory(at: hogDir, withIntermediateDirectories: true)
+let hog = hogDir.appendingPathComponent("aws_vpn_client_cli_20260811.log")
+FileManager.default.createFile(atPath: hog.path, contents: Data(count: 2 * 1024 * 1024))
+check(
+    "retention will not touch a single oversized current day",
+    ClientLogs.prune(clientHome: hogHome, retainingDays: 3) == 0
+)
+check(
+    "the cap will — nothing holds these open, so it is recreated",
+    ClientLogs.enforceCap(clientHome: hogHome, maxBytes: 1_048_576) == 1
+)
+check(
+    "a cap of zero is treated as no cap rather than as delete everything",
+    {
+        FileManager.default.createFile(atPath: hog.path, contents: Data(count: 1024))
+        return ClientLogs.enforceCap(clientHome: hogHome, maxBytes: 0) == 0
+    }()
+)
 
 // MARK: - Result
 

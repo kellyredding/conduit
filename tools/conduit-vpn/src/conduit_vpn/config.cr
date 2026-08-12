@@ -79,8 +79,10 @@ module ConduitVPN
         description: "Seconds between connection checks at rest, with the " \
                      "menu closed. Used by the menu bar application, which " \
                      "polls continuously; only the connection listing is " \
-                     "re-read at this rate.",
-        default: -> { "2" },
+                     "re-read at this rate. Deliberately slow: a tunnel " \
+                     "appearing or vanishing changes the network path, " \
+                     "which triggers a check immediately regardless.",
+        default: -> { "60" },
       ),
       Key.new(
         name: "connect-timeout",
@@ -96,6 +98,22 @@ module ConduitVPN
         description: "Seconds to wait in the sign-in state before saying " \
                      "out loud that a browser is waiting.",
         default: -> { "15" },
+      ),
+      Key.new(
+        name: "log-retention-days",
+        env: "CONDUIT_LOG_RETENTION_DAYS",
+        description: "Days of the AWS VPN Client's own logs to keep. It " \
+                     "writes one file per day and removes none of them, and " \
+                     "Conduit never reads them. Zero keeps only today's.",
+        default: -> { "3" },
+      ),
+      Key.new(
+        name: "log-max-megabytes",
+        env: "CONDUIT_LOG_MAX_MB",
+        description: "Ceiling on the AWS VPN Client's own logs. Oldest are " \
+                     "removed first once the total exceeds it, including the " \
+                     "current day's if it alone is over.",
+        default: -> { "5" },
       ),
       Key.new(
         name: "connect-grace-polls",

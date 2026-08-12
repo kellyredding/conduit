@@ -13,6 +13,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ship — doing it at runtime keeps the icon out of the Dock and the
         // ⌘-Tab switcher while leaving it listed everywhere it is looked for.
         NSApp.setActivationPolicy(.accessory)
+
+        // The client writes a log a day and removes none of them, and this is
+        // the only thing that will. Repeating rather than running once at
+        // launch: with login items arriving, this process can stay up for
+        // weeks, and housekeeping that only happens at startup stops
+        // happening at all on exactly the machines that need it most.
+        Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                let home = ConduitConfig.clientHome
+                // Retention first: it removes whole days cheaply, and the cap
+                // then only has to deal with whatever bulk is left.
+                ClientLogs.prune(
+                    clientHome: home,
+                    retainingDays: ConduitConfig.int("log-retention-days") ?? 3
+                )
+                ClientLogs.enforceCap(
+                    clientHome: home,
+                    maxBytes: Int64(ConduitConfig.int("log-max-megabytes") ?? 5)
+                        * 1_048_576
+                )
+                try? await Task.sleep(for: .seconds(6 * 60 * 60))
+            }
+        }
+
         Task { @MainActor in VPNStore.shared.start() }
     }
 

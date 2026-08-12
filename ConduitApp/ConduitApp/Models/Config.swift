@@ -81,12 +81,14 @@ enum ConduitConfig {
             name: "poll-interval-idle",
             env: "CONDUIT_POLL_IDLE",
             description: """
-                Seconds between connection checks at rest, with the menu \
-                closed. Only the connection listing is re-read at this rate; \
-                the profile listing is far more expensive to no purpose, \
-                since it changes only when a profile is imported or removed.
+                Seconds between connection checks at rest — nothing connected \
+                or in flight, and the menu closed, so only the icon is \
+                visible. Deliberately slow: a tunnel appearing or vanishing \
+                changes the network path, which triggers a check immediately \
+                regardless of this, so polling is only the safety net. Every \
+                check writes a line to the client's log, which nothing rotates.
                 """,
-            defaultValue: { "2" }
+            defaultValue: { "60" }
         ),
         Key(
             name: "connect-timeout",
@@ -104,6 +106,27 @@ enum ConduitConfig {
                 that a browser is waiting.
                 """,
             defaultValue: { "15" }
+        ),
+        Key(
+            name: "log-retention-days",
+            env: "CONDUIT_LOG_RETENTION_DAYS",
+            description: """
+                Days of the AWS VPN Client's own logs to keep. It writes one \
+                file per day and removes none of them; Conduit never reads \
+                them. Zero keeps only today's.
+                """,
+            defaultValue: { "3" }
+        ),
+        Key(
+            name: "log-max-megabytes",
+            env: "CONDUIT_LOG_MAX_MB",
+            description: """
+                Ceiling on the AWS VPN Client's own logs. Oldest are removed \
+                first once the total exceeds it, including the current day's \
+                if it alone is over — nothing holds these open, so a removed \
+                file is recreated on the next query.
+                """,
+            defaultValue: { "5" }
         ),
         Key(
             name: "connect-grace-polls",
