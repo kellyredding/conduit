@@ -892,6 +892,360 @@ let neverWent = runAsync {
 }
 check("a teardown that never lands times out", neverWent == .timedOut)
 
+// MARK: - Throughput, differenced from cumulative totals
+//
+// The client reports totals only, so every rate here is the quotient of two
+// readings, and the interesting cases are the ones that must NOT produce a
+// number: the first reading, a counter that reset, a gap nobody was watching
+// through, and a reading that never arrived. Each of those has an arithmetically
+// valid answer that describes something untrue.
+
+func counters(in inbound: Int64, out outbound: Int64) -> VPNByteCounters {
+    VPNByteCounters(
+        tunnelIn: inbound,
+        tunnelOut: outbound,
+        transportIn: inbound,
+        transportOut: outbound
+    )
+}
+
+let start = Date(timeIntervalSince1970: 1_000_000)
+let stale: TimeInterval = 10
+
+var series = ThroughputSeries()
+series.record(counters(in: 1_000, out: 500), at: start, staleAfter: stale)
+check("one reading is not a rate", series.isEmpty)
+
+series.record(
+    counters(in: 3_000, out: 1_500),
+    at: start.addingTimeInterval(2),
+    staleAfter: stale
+)
+check("two readings make one rate", series.rates.count == 1)
+check("inbound rate is the difference over the interval", series.latest?.inPerSecond == 1_000)
+check("outbound rate likewise", series.latest?.outPerSecond == 500)
+check("the first rate of a run says so", series.latest?.startsRun == true)
+
+series.record(
+    counters(in: 5_000, out: 2_500),
+    at: start.addingTimeInterval(4),
+    staleAfter: stale
+)
+check("a contiguous rate does not start a run", series.latest?.startsRun == false)
+check("and the peak is the largest seen", series.peak == 1_000)
+
+// A counter that went backwards is a new attempt, not negative traffic.
+var afterReset = series
+afterReset.record(
+    counters(in: 10, out: 5),
+    at: start.addingTimeInterval(6),
+    staleAfter: stale
+)
+check("a counter that reset yields no rate", afterReset.rates.count == 2)
+afterReset.record(
+    counters(in: 2_010, out: 1_005),
+    at: start.addingTimeInterval(8),
+    staleAfter: stale
+)
+check(
+    "and the reading that reset becomes the new baseline",
+    afterReset.rates.count == 3 && afterReset.latest?.inPerSecond == 1_000
+)
+check("a rate after a reset begins a new run", afterReset.latest?.startsRun == true)
+
+// A gap longer than the cadence allows: the counters kept climbing while nobody
+// was looking, and spreading that traffic over the gap reports the mean of an
+// unobserved period as the current rate.
+var afterGap = series
+afterGap.record(
+    counters(in: 500_000, out: 250_000),
+    at: start.addingTimeInterval(4 + stale + 1),
+    staleAfter: stale
+)
+check("a gap past the stale limit yields no rate", afterGap.rates.count == 2)
+
+// An absent payload is a hole, not a quiet moment. `details` arrives
+// present-with-zeros from a stalled attempt, so absence cannot be read as zero.
+var withHole = series
+withHole.record(nil, at: start.addingTimeInterval(6), staleAfter: stale)
+check("an absent reading yields no rate", withHole.rates.count == 2)
+withHole.record(
+    counters(in: 7_000, out: 3_500),
+    at: start.addingTimeInterval(8),
+    staleAfter: stale
+)
+check(
+    "and the reading after a hole is not differenced across it",
+    withHole.rates.count == 2
+)
+withHole.record(
+    counters(in: 9_000, out: 4_500),
+    at: start.addingTimeInterval(10),
+    staleAfter: stale
+)
+check("while the interval after that is measured", withHole.rates.count == 3)
+check("and it begins a new run", withHole.latest?.startsRun == true)
+
+// Two readings in one instant divide by zero; a clock that moved backwards
+// divides by a negative.
+var sameInstant = ThroughputSeries()
+sameInstant.record(counters(in: 1_000, out: 500), at: start, staleAfter: stale)
+sameInstant.record(counters(in: 2_000, out: 1_000), at: start, staleAfter: stale)
+check("two readings at one instant yield no rate", sameInstant.isEmpty)
+
+var backwards = ThroughputSeries()
+backwards.record(counters(in: 1_000, out: 500), at: start, staleAfter: stale)
+backwards.record(
+    counters(in: 2_000, out: 1_000),
+    at: start.addingTimeInterval(-5),
+    staleAfter: stale
+)
+check("a clock that moved backwards yields no rate", backwards.isEmpty)
+
+var bounded = ThroughputSeries(capacity: 3)
+for step in 1...10 {
+    bounded.record(
+        counters(in: Int64(step) * 1_000, out: Int64(step) * 100),
+        at: start.addingTimeInterval(Double(step)),
+        staleAfter: stale
+    )
+}
+check("history is bounded", bounded.rates.count == 3)
+check("and keeps the newest", bounded.latest?.at == start.addingTimeInterval(10))
+
+// A cadence slower than a fixed staleness limit would discard every sample. The
+// limit is derived from the interval for exactly this reason, so a rate recorded
+// at a slow cadence still counts when the limit travels with it.
+var slowCadence = ThroughputSeries()
+slowCadence.record(counters(in: 0, out: 0), at: start, staleAfter: 300)
+slowCadence.record(
+    counters(in: 6_000, out: 600),
+    at: start.addingTimeInterval(60),
+    staleAfter: 300
+)
+check("a slow cadence still measures", slowCadence.latest?.inPerSecond == 100)
+
+// MARK: - Routes and resolvers, as the OS prints them
+//
+// The fixtures below carry no addresses at all — not even documentation ranges.
+// The disclosure audit refuses a dotted quad anywhere in a tracked file, which is
+// the right rule for a public repository driving a VPN, and these parsers happen
+// to make it costless: they *locate* the destination, gateway, and nameserver
+// fields and never interpret them, so an opaque token exercises the same code
+// path an address would.
+//
+// What that leaves untested is the live shape — real output with a tunnel up.
+// Nothing was connected when these were written, so the utun filtering is
+// verified against the format above and against the format alone. It needs one
+// pass with a tunnel established before it can be called measured.
+
+let routeTable = """
+    Routing tables
+
+    Internet:
+    Destination        Gateway            Flags        Netif Expire
+    default            gateway-a          UGScg          en0
+    link-local         link#24            UCSIg     bridge100      !
+    dest-one           gateway-b          UGSc         utun4
+    dest-two           utun4              UHWIig       utun4
+    dest-three         gateway-c          UGSc         utun7
+    utun9              gateway-d          UH             lo0
+    """
+
+let tunnelRoutes = TunnelFactsParser.routes(fromNetstat: routeTable)
+check("only tunnel rows are taken", tunnelRoutes.count == 3)
+check(
+    "the header and other interfaces fall out without being parsed",
+    !tunnelRoutes.contains { $0.interface == "en0" || $0.interface == "bridge100" }
+)
+check("destination comes from the first field", tunnelRoutes.first?.destination == "dest-one")
+check("gateway from the second", tunnelRoutes.first?.gateway == "gateway-b")
+
+// The gateway column can hold an interface name on a point-to-point route, so
+// the interface is the LAST matching field. Taking the first would report the
+// gateway as the interface for this row.
+let pointToPoint = tunnelRoutes.first { $0.destination == "dest-two" }
+check("a route whose gateway is the interface still reads correctly", pointToPoint?.interface == "utun4")
+check("and keeps its gateway", pointToPoint?.gateway == "utun4")
+
+// A tunnel name in the destination column is not a tunnel route. Guards the one
+// column assumption the parser does make.
+check(
+    "a row merely mentioning a tunnel elsewhere is not a tunnel route",
+    !tunnelRoutes.contains { $0.destination == "utun9" }
+)
+
+let facts = TunnelFacts(routes: tunnelRoutes, resolvers: [], readAt: start)
+check("interfaces are listed once, in first-seen order", facts.interfaces == ["utun4", "utun7"])
+check("routes filter by interface", facts.routes(on: "utun7").count == 1)
+check("having read and found nothing is not the same as not having read", facts.hasBeenRead)
+check("and an unread set says so", !TunnelFacts().hasBeenRead)
+
+// Split versus full is the difference between "all traffic goes through the VPN"
+// and "four prefixes do", and it decides what every byte counter in the window
+// means. Measured on a live tunnel: `default` belonged to the physical interface,
+// so a speed test crossed the tunnel not at all.
+check("a tunnel holding only specific prefixes is a split tunnel", !facts.carriesDefaultRoute)
+
+let fullTunnel = TunnelFactsParser.routes(
+    fromNetstat: """
+        Destination        Gateway            Flags        Netif Expire
+        default            gateway-a          UGScg          en0
+        default            gateway-b          UGSc         utun4
+        dest-one           gateway-b          UGSc         utun4
+        """
+)
+check(
+    "a default route on a tunnel is a full tunnel",
+    TunnelFacts(routes: fullTunnel, resolvers: [], readAt: start).carriesDefaultRoute
+)
+check(
+    "and the physical interface's own default is not mistaken for one",
+    !fullTunnel.contains { $0.interface == "en0" }
+)
+
+// Two sections, and the resolver numbering restarts in the second — measured.
+let dnsConfiguration = """
+    DNS configuration
+
+    resolver #1
+      search domain[0] : example.test
+      nameserver[0] : ns-wired
+      if_index : 14 (en0)
+      flags    : Request A records
+      reach    : 0x00000002 (Reachable)
+
+    resolver #2
+      domain   : example.test
+      options  : mdns
+      timeout  : 5
+      flags    : Request A records
+      order    : 300000
+
+    resolver #3
+      nameserver[0] : ns-unscoped
+      flags    : Request A records
+
+    DNS configuration (for scoped queries)
+
+    resolver #1
+      search domain[0] : example.test
+      search domain[1] : sub.example.test
+      nameserver[0] : ns-tunnel-first
+      nameserver[1] : ns-tunnel-second
+      if_index : 21 (utun4)
+      flags    : Scoped, Request A records
+      reach    : 0x00000002 (Reachable)
+
+    resolver #2
+      nameserver[0] : ns-wired
+      if_index : 14 (en0)
+      flags    : Scoped, Request A records
+    """
+
+// Every resolver with a nameserver is kept, scoped or not. On the deployment
+// this was measured against, nothing is scoped to the tunnel — so a list filtered
+// to tunnel-scoped resolvers was empty by construction and answered a narrower
+// question than "what will resolve names here".
+let allResolvers = TunnelFactsParser.resolvers(fromScutil: dnsConfiguration)
+check("every resolver offering a nameserver is kept", allResolvers.count == 4)
+check(
+    "a block with no nameserver is not a resolver worth listing",
+    !allResolvers.contains { $0.nameservers.isEmpty }
+)
+check(
+    "order is preserved as the OS reports it",
+    allResolvers.map(\.interface) == ["en0", nil, "utun4", "en0"]
+)
+
+let tunnelScoped = allResolvers.filter(\.isTunnelScoped)
+check("a tunnel-scoped resolver is recognized as one", tunnelScoped.count == 1)
+check("the interface comes from if_index", tunnelScoped.first?.interface == "utun4")
+check(
+    "nameservers keep the order they are used in",
+    tunnelScoped.first?.nameservers == ["ns-tunnel-first", "ns-tunnel-second"]
+)
+check(
+    "search domains are collected",
+    tunnelScoped.first?.searchDomains == ["example.test", "sub.example.test"]
+)
+
+let unscoped = allResolvers.first { $0.interface == nil }
+check("a resolver naming no interface is unscoped rather than dropped", unscoped != nil)
+check("and says so rather than showing a blank", unscoped?.scopeDescription == "not scoped to an interface")
+check("an unscoped resolver is not claimed for the tunnel", unscoped?.isTunnelScoped == false)
+check(
+    "nor is one scoped to the physical interface",
+    allResolvers.first?.isTunnelScoped == false
+)
+
+// The same resolver is routinely printed in both sections. Listing it twice
+// would claim two resolvers exist.
+let duplicated = """
+    DNS configuration
+
+    resolver #1
+      nameserver[0] : ns-tunnel
+      if_index : 21 (utun4)
+
+    DNS configuration (for scoped queries)
+
+    resolver #1
+      nameserver[0] : ns-tunnel
+      if_index : 21 (utun4)
+    """
+check(
+    "an identical resolver in both sections is one resolver",
+    TunnelFactsParser.resolvers(fromScutil: duplicated).count == 1
+)
+
+check(
+    "if_index yields the name in parentheses",
+    TunnelFactsParser.interfaceName(fromIfIndex: "21 (utun4)") == "utun4"
+)
+check(
+    "and nothing when there is no name to take",
+    TunnelFactsParser.interfaceName(fromIfIndex: "21") == nil
+)
+check("a tunnel is recognized by name", TunnelFactsParser.isTunnel("utun4"))
+check("and other interfaces are not", !TunnelFactsParser.isTunnel("en0"))
+check("neither is empty output", TunnelFactsParser.routes(fromNetstat: "").isEmpty)
+check("nor empty resolver output", TunnelFactsParser.resolvers(fromScutil: "").isEmpty)
+
+// MARK: - Activity log
+
+var activityLog = ActivityLog(capacity: 3)
+activityLog.record(.connected, profile: "Alpha", at: start)
+activityLog.record(.disconnected, profile: "Alpha", at: start.addingTimeInterval(60))
+check("the newest entry is first", activityLog.entries.first?.kind == .disconnected)
+check("and carries its profile", activityLog.entries.first?.profile == "Alpha")
+check("entries read as observation", activityLog.entries.first?.text == "Alpha disconnected")
+
+activityLog.record(.clientUnavailable, at: start.addingTimeInterval(120))
+activityLog.record(.clientReady, at: start.addingTimeInterval(180))
+check("the log is bounded", activityLog.entries.count == 3)
+check("and the oldest is what goes", !activityLog.entries.contains { $0.kind == .connected })
+check(
+    "the client's own availability is recorded without a profile",
+    activityLog.entries.first?.profile == nil
+        && activityLog.entries.first?.text == "The client answered again"
+)
+check("an empty log says so", ActivityLog().isEmpty)
+
+// A tunnel that predates the process produced no transition to observe. Recorded
+// as a state that was found, worded so it cannot be mistaken for one that was
+// witnessed.
+var baseline = ActivityLog()
+baseline.record(.alreadyConnected, profile: "Bravo", at: start)
+check(
+    "a connection that predates the process is recorded as found, not witnessed",
+    baseline.entries.first?.text == "Bravo was already connected"
+)
+check(
+    "and it is a distinct kind rather than an ordinary connect",
+    baseline.entries.first?.kind == .alreadyConnected
+)
+
 // MARK: - Result
 
 print("")

@@ -24,9 +24,25 @@ final class VPNStore: ObservableObject {
     @Published private(set) var health: ClientHealth = .unknown
     @Published private(set) var lastUpdated: Date?
 
-    /// Only populated while the menu is open. Nobody can see a byte count in a
-    /// closed menu, and fetching it costs one subprocess per live tunnel.
+    /// Only populated while a surface that displays them is open — the panel or
+    /// the detail window. Nobody can see a byte count in a closed menu, and
+    /// fetching it costs one subprocess per live tunnel.
     @Published private(set) var counters: [String: VPNByteCounters] = [:]
+
+    /// Rates, differenced from those counters, per connected profile.
+    ///
+    /// Discarded when the last surface showing them closes, rather than kept for
+    /// the next opening. A plot of rates is read as "now", and history from a
+    /// window that was closed an hour ago says so only in an axis label nobody
+    /// reads. Sampling that runs while somebody is watching should produce
+    /// history that describes exactly that period.
+    @Published private(set) var throughput: [String: ThroughputSeries] = [:]
+
+    /// Transitions as they were observed, whether or not they were announced.
+    @Published private(set) var activity = ActivityLog()
+
+    /// Routes and resolvers, read from the OS on events rather than polled.
+    @Published private(set) var facts = TunnelFacts()
 
     var iconState: MenuIconState {
         MenuIcon.state(for: profiles, health: health, settling: isSettling)
@@ -49,8 +65,16 @@ final class VPNStore: ObservableObject {
     }
 
     private let client: VPNClient
+    private let probe = SystemProbe()
     private var pollTask: Task<Void, Never>?
     private var menuIsOpen = false
+    private var detailIsOpen = false
+
+    /// Whether anyone can see a per-connection detail. Both surfaces show
+    /// throughput, so both want sampling — and asking this rather than asking
+    /// about the menu is what stops closing the panel from stopping the samples
+    /// underneath an open detail window.
+    private var isWatching: Bool { menuIsOpen || detailIsOpen }
     private var pathMonitor: NWPathMonitor?
     private var observers: [NSObjectProtocol] = []
 
@@ -201,11 +225,21 @@ final class VPNStore: ObservableObject {
     // watched closely whoever started it, and an abandoned one drops back to
     // resting without waiting out the client's timeout.
     private var interval: TimeInterval {
-        let name = menuIsOpen || isSettling
+        let name = isWatching || isSettling
             ? "poll-interval-active"
             : "poll-interval-idle"
         let seconds = ConduitConfig.seconds(name)
         return seconds > 0 ? seconds : 5
+    }
+
+    /// How long a gap can be and still be differenced into a rate. Five missed
+    /// samples, derived from the cadence rather than picked: a fixed number of
+    /// seconds would silently discard every sample on a machine configured to
+    /// poll more slowly than it, leaving a throughput readout permanently empty
+    /// for no visible reason.
+    private static var staleAfter: TimeInterval {
+        let active = ConduitConfig.seconds("poll-interval-active")
+        return max((active > 0 ? active : 2) * 5, 10)
     }
 
     func menuOpened() {
@@ -221,9 +255,35 @@ final class VPNStore: ObservableObject {
 
     func menuClosed() {
         menuIsOpen = false
-        counters.removeAll()
-        Task { await client.cancelAll() }
+        stopWatchingIfUnobserved()
         restartPolling()
+    }
+
+    /// Called by the window controller rather than by the view's lifecycle.
+    ///
+    /// A window ordered out does not reliably retire the SwiftUI view inside it,
+    /// so `onDisappear` is not a signal that sampling should stop — and a
+    /// sampler that never stops is the exact cost this was scoped to avoid.
+    func detailOpened() {
+        detailIsOpen = true
+        restartPolling()
+        refreshFactsNow()
+    }
+
+    func detailClosed() {
+        detailIsOpen = false
+        stopWatchingIfUnobserved()
+        restartPolling()
+    }
+
+    /// Only once *both* surfaces are closed. Cancelling in-flight queries when
+    /// the panel closes over an open detail window would abort that window's own
+    /// samples, and clearing the counters would blank the readout it is showing.
+    private func stopWatchingIfUnobserved() {
+        guard !isWatching else { return }
+        counters.removeAll()
+        throughput.removeAll()
+        Task { await client.cancelAll() }
     }
 
     func refreshNow() {
@@ -277,17 +337,59 @@ final class VPNStore: ObservableObject {
                 profiles: knownProfiles,
                 connections: listedConnections
             )
+
+            let now = Date()
+            // Read before the assignment below overwrites it. Only a recovery
+            // from an actual failure is worth an entry: the initial `.unknown`
+            // is not a failure, so a launch does not open the log with news
+            // about a client that was never unreachable.
+            if health.isUnavailable {
+                activity.record(.clientReady, at: now)
+            }
             health = .ready
-            lastUpdated = Date()
+            lastUpdated = now
+
             let nowConnected = Set(profiles.filter(\.isConnected).map(\.name))
+            let appeared = nowConnected.subtracting(lastConnected)
+            let vanished = lastConnected.subtracting(nowConnected)
             if hasObserved {
-                announce(
-                    appeared: nowConnected.subtracting(lastConnected),
-                    vanished: lastConnected.subtracting(nowConnected)
-                )
+                // Recorded before announcing, and unconditionally. The
+                // announcement is suppressed for a change the person made
+                // themselves — they watched it happen — but the log is a record
+                // rather than news, and one with holes exactly where somebody
+                // acted is a record that cannot be read.
+                for name in appeared.sorted() {
+                    activity.record(.connected, profile: name, at: now)
+                }
+                for name in vanished.sorted() {
+                    activity.record(.disconnected, profile: name, at: now)
+                }
+                announce(appeared: appeared, vanished: vanished)
+            } else {
+                // The first successful reading. Anything connected here was
+                // established before this process existed, so it is a state
+                // found rather than a transition seen — recorded to establish
+                // the baseline, and deliberately not announced, since a tunnel
+                // that has been up for hours is not news.
+                for name in nowConnected.sorted() {
+                    activity.record(.alreadyConnected, profile: name, at: now)
+                }
             }
             hasObserved = true
             lastConnected = nowConnected
+
+            // A series belongs to a live tunnel. Left in place, one for a
+            // profile that disconnected would go on showing the rates it had
+            // when it died, and the next connection would difference against
+            // counters from the previous tunnel.
+            throughput = throughput.filter { nowConnected.contains($0.key) }
+
+            // Routes and resolvers change when a tunnel appears or goes away,
+            // which is precisely this condition — so they are re-read here
+            // rather than on a timer.
+            if !appeared.isEmpty || !vanished.isEmpty {
+                refreshFactsNow()
+            }
 
             // A restore is finished when a poll has actually seen the tunnel,
             // not when a connect was accepted — the client accepts an attempt
@@ -312,12 +414,19 @@ final class VPNStore: ObservableObject {
                 }
             }
 
-            if menuIsOpen {
+            if isWatching {
                 await refreshCounters()
             }
         } catch is CancellationError {
             return
         } catch {
+            // Only the transition into unavailability, not every failed poll —
+            // a client that stays down is polled every few seconds and would
+            // otherwise fill the log with one entry per attempt and push out
+            // the transitions worth keeping.
+            if !health.isUnavailable {
+                activity.record(.clientUnavailable, at: Date())
+            }
             // The last known profile states are deliberately left in place. A
             // client that stopped answering has not told us the tunnels went
             // away, and blanking the menu would assert something untrue while
@@ -350,14 +459,39 @@ final class VPNStore: ObservableObject {
     }
 
     private func refreshCounters() async {
+        let staleAfter = Self.staleAfter
         for profile in profiles where profile.isConnected {
             guard !Task.isCancelled else { return }
-            if let status = try? await client.status(
+            let status = try? await client.status(
                 profile: profile.name,
                 details: true
-            ), let details = status.attempt?.details {
+            )
+            let details = status?.attempt?.details
+            if let details {
                 counters[profile.name] = details
             }
+
+            // Recorded even when absent, which is why the optional travels this
+            // far intact instead of being flattened to zero at the decoder. A
+            // missing payload is a hole in the record; a series not told about
+            // it differences straight across the hole and reports two intervals
+            // of traffic as the rate of one.
+            var series = throughput[profile.name] ?? ThroughputSeries()
+            series.record(details, at: Date(), staleAfter: staleAfter)
+            throughput[profile.name] = series
+        }
+    }
+
+    /// Reads routes and resolvers, if anyone is looking at them.
+    ///
+    /// Guarded on the detail window being open rather than reading
+    /// unconditionally: nothing else displays these, so two subprocesses per
+    /// connection change would be spent on an answer with no reader.
+    func refreshFactsNow() {
+        guard detailIsOpen else { return }
+        Task { [weak self] in
+            guard let read = await self?.probe.read() else { return }
+            self?.facts = read
         }
     }
 

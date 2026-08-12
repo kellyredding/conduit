@@ -163,6 +163,12 @@ struct MenuContent: View {
                 action: { PreferencesWindowController.showPreferences() }
             )
             glyph(
+                "chart.xyaxis.line",
+                help: "Connection details",
+                shortcut: "d",
+                action: { DetailWindowController.showDetail() }
+            )
+            glyph(
                 "arrow.clockwise",
                 help: "Refresh now",
                 action: { store.refreshNow() }
