@@ -53,9 +53,12 @@ struct VPNByteCounters: Decodable, Equatable, Sendable {
 struct VPNAttempt: Decodable, Equatable, Sendable {
     let updatedAt: String?
 
-    /// Absent whenever the profile is not connected, even when details were
-    /// requested. Optional rather than zero-defaulted: zeroed counters read as
-    /// a live tunnel that has carried no traffic, which is a different claim.
+    /// Absent for an idle profile, and present with every counter zero for a
+    /// stalled one — so its presence says nothing about whether a tunnel
+    /// exists. Optional rather than zero-defaulted because the client itself
+    /// emits the all-zero payload, which a zero default would be
+    /// indistinguishable from, and both read as a live tunnel carrying no
+    /// traffic.
     let details: VPNByteCounters?
 
     enum CodingKeys: String, CodingKey {

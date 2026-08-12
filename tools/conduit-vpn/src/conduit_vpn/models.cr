@@ -71,9 +71,11 @@ module ConduitVPN
       @[JSON::Field(key: "updated-at")]
       getter updated_at : String?
 
-      # Absent whenever the profile is not connected, even when details were
-      # requested. Optional rather than zero-defaulted: zeroed counters would
-      # read as a live tunnel that has moved no bytes.
+      # Absent for an idle profile, and present with every counter zero for a
+      # stalled one — so its presence says nothing about whether a tunnel
+      # exists. Optional rather than zero-defaulted because the client itself
+      # emits the all-zero payload, which a zero default would be
+      # indistinguishable from, and both read as a live tunnel moving no bytes.
       getter details : ByteCounters?
     end
 

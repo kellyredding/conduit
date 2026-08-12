@@ -64,9 +64,16 @@ the other silently desynchronizes the CLI from the app:
 - **`disconnect` prints nothing on success.** The exit code is the only signal.
 - **Errors arrive on stdout**, not stderr, as `{"status":"Error","message":…}`
   with exit 1.
-- **`details` is absent** from a status response whenever the profile is not
-  connected, even with `--show-details`. Keep it optional; never default the
-  byte counters to zero.
+- **`details` is not a signal of connectedness.** It is absent for an idle
+  profile, but a stalled attempt returns it *present with every counter zero*.
+  Keep it optional and never default the counters to zero: that exact payload
+  arrives from the client, and a zeroed default is indistinguishable from it.
+- **A stalled attempt blocks its own replacement.** After a wake the client
+  starts an attempt nobody asked for, and if the network has not returned it
+  parks in `WaitingForIdentity` for about ten minutes. Throughout, `connect`
+  exits 1 with `Already connected to profile` while no tunnel exists at all —
+  no route, no interface address, no bytes. `disconnect` clears it instantly
+  and a `connect` then succeeds. Read the state, never the sentence.
 - **Several connections can be live at once.** Not a single-valued state.
 - **Conduit is never the only actor.** Connections are created and destroyed
   by other tools. Reconcile against the client continuously; never assume a
