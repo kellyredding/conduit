@@ -13,15 +13,23 @@ import Foundation
 /// MIRROR: tools/conduit-vpn/src/conduit_vpn/config.cr
 ///
 /// Key names, defaults, and their order must match that file exactly — they
-/// are one contract expressed twice, and the CLI and this application read the
-/// same file on the same machine. Writing settings lives on the CLI side for
-/// now; this side resolves them.
+/// are one contract expressed twice, and the CLI and this application read and
+/// write the same file on the same machine.
 enum ConduitConfig {
     struct Key: Sendable {
         let name: String
         let env: String
         let description: String
         let defaultValue: @Sendable () -> String
+
+        /// The values this setting accepts, when it accepts a fixed set.
+        ///
+        /// Present on the Swift side only. The command line writes any string
+        /// into the file, so a value outside this list is reachable and every
+        /// reader of a constrained setting parses leniently rather than
+        /// trusting it. What this buys is a picker in the settings window
+        /// instead of somebody typing a word that has to match exactly.
+        var choices: [String] = []
     }
 
     enum Source: String, Sendable {
@@ -121,6 +129,17 @@ enum ConduitConfig {
             defaultValue: { "true" }
         ),
         Key(
+            name: "theme",
+            env: "CONDUIT_THEME",
+            description: """
+                Appearance of the application's own windows: system, light, or \
+                dark. Read by the application only; the command line has no \
+                windows to theme. Anything unrecognized is treated as system.
+                """,
+            defaultValue: { "system" },
+            choices: ThemePreference.allCases.map(\.rawValue)
+        ),
+        Key(
             name: "log-retention-days",
             env: "CONDUIT_LOG_RETENTION_DAYS",
             description: """
@@ -217,6 +236,121 @@ enum ConduitConfig {
     /// A malformed file degrades to defaults rather than aborting. The work
     /// the user actually wants is usually still possible, and a settings file
     /// is a poor reason to refuse to report connection status.
+    // MARK: - Writing
+    //
+    // MIRROR: the command line's own config set / unset. Both write the same
+    // file, so the two must agree on what writing one setting does to the
+    // rest of it — otherwise editing from one surface quietly discards what
+    // was set from the other.
+    //
+    // Everything already in the file is preserved, including keys this build
+    // does not recognize: a settings file written by a newer version must
+    // survive being edited by an older one. Only the named key changes.
+
+    enum WriteFailure: LocalizedError {
+        case unknownKey(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unknownKey(let name):
+                return "\(name) is not a setting Conduit knows about."
+            }
+        }
+    }
+
+    static func set(_ name: String, to value: String) throws {
+        guard key(named: name) != nil else { throw WriteFailure.unknownKey(name) }
+        var object = rawFileObject()
+        object[name] = value
+        try write(object)
+    }
+
+    /// Records a value, or removes it when it is the default.
+    ///
+    /// The file records only what differs from a default — that is what lets a
+    /// default improve in code and take effect on a machine already
+    /// configured. Writing the default back into it freezes today's answer,
+    /// and does so invisibly, because the value on screen looks identical
+    /// either way.
+    ///
+    /// An empty value means the same thing as choosing the default, which is
+    /// what lets a settings field clear to it rather than needing a separate
+    /// affordance for going back.
+    ///
+    /// Distinct from `set` rather than replacing it: the command line writing
+    /// a default is a direct instruction and should be honoured literally,
+    /// while a form is a place where the default is a resting state.
+    static func apply(_ name: String, _ value: String) throws {
+        guard let key = key(named: name) else { throw WriteFailure.unknownKey(name) }
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || trimmed == key.defaultValue() {
+            try unset(name)
+        } else {
+            try set(name, to: trimmed)
+        }
+    }
+
+    static func unset(_ name: String) throws {
+        guard key(named: name) != nil else { throw WriteFailure.unknownKey(name) }
+        var object = rawFileObject()
+        object.removeValue(forKey: name)
+        try write(object)
+    }
+
+    /// Unfiltered, unlike `fileValues`, which drops anything this build has no
+    /// key for. Writing has to carry those through rather than silently
+    /// deleting settings it happens not to understand.
+    private static func rawFileObject() -> [String: Any] {
+        let url = ConduitPaths.configFile
+        guard
+            let data = try? Data(contentsOf: url),
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let dictionary = object as? [String: Any]
+        else { return [:] }
+        return dictionary
+    }
+
+    /// Everything back to its compiled defaults.
+    ///
+    /// Removing the file is the whole implementation, because the file holds
+    /// only what differs from a default — so its absence is not a special
+    /// empty state to interpret, it is the normal one. That is also why this
+    /// cannot half-work: there is no per-key bookkeeping to get out of step.
+    static func resetAll() throws {
+        let url = ConduitPaths.configFile
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private static func write(_ values: [String: Any]) throws {
+        let url = ConduitPaths.configFile
+
+        // Nothing left to record means the file itself should go. An absent
+        // file is the documented normal case; a file containing an empty
+        // object is the same statement made confusingly, and it invites the
+        // question of whether something failed to save.
+        if values.isEmpty {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+
+        let data = try JSONSerialization.data(
+            withJSONObject: values,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        var text = String(decoding: data, as: UTF8.self)
+        // JSONSerialization indents with two spaces, matching the command
+        // line, but leaves no trailing newline — and a settings file without
+        // one is a nuisance in every terminal that reads it.
+        text += "\n"
+
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     static func fileValues() -> [String: String] {
         let url = ConduitPaths.configFile
         guard

@@ -164,6 +164,7 @@ let expectedKeys = [
     "connect-timeout",
     "identity-hint-after",
     "restore-on-wake",
+    "theme",
     "log-retention-days",
     "log-max-megabytes",
     "connect-grace-polls",
@@ -185,6 +186,115 @@ check(
     "the client home derives from the root rather than being fixed",
     ConduitConfig.clientHome.path
         == ConduitPaths.root.appendingPathComponent("client-home").path
+)
+
+// MARK: - Writing settings
+//
+// Both surfaces write this file, so what writing one setting does to the rest
+// of it is a contract rather than an implementation detail.
+
+let writable = NSTemporaryDirectory() + "conduit-smoke-write.json"
+setenv("CONDUIT_CONFIG", writable, 1)
+try? FileManager.default.removeItem(atPath: writable)
+
+check(
+    "a setting round-trips through the file",
+    (try? ConduitConfig.set("connect-timeout", to: "45")) != nil
+        && ConduitConfig.int("connect-timeout") == 45
+)
+check(
+    "the source is the file once written, not the default",
+    ConduitConfig.resolve("connect-timeout")?.source == .file
+)
+check(
+    "writing one setting leaves another alone",
+    (try? ConduitConfig.set("poll-interval-idle", to: "90")) != nil
+        && ConduitConfig.int("connect-timeout") == 45
+        && ConduitConfig.int("poll-interval-idle") == 90
+)
+check(
+    "unsetting falls back to the compiled default",
+    (try? ConduitConfig.unset("connect-timeout")) != nil
+        && ConduitConfig.int("connect-timeout") == 120
+        && ConduitConfig.resolve("connect-timeout")?.source == .default
+)
+// A file written by a newer build must survive being edited by an older one,
+// so a key this build has no idea about is carried through rather than
+// quietly dropped.
+try? #"{"poll-interval-idle": "90", "future-setting": "keep me"}"#
+    .write(toFile: writable, atomically: true, encoding: .utf8)
+try? ConduitConfig.set("connect-timeout", to: "30")
+let rewritten = (try? String(contentsOfFile: writable, encoding: .utf8)) ?? ""
+check("an unrecognized setting survives a write", rewritten.contains("future-setting"))
+check("and the written file ends in a newline", rewritten.hasSuffix("\n"))
+// The file's own invariant: it records what differs from a default and
+// nothing else. Writing a default back into it freezes today's answer, and
+// invisibly, because the value on screen reads the same either way.
+try? FileManager.default.removeItem(atPath: writable)
+try? ConduitConfig.apply("connect-timeout", "45")
+check(
+    "applying a non-default records it",
+    ConduitConfig.resolve("connect-timeout")?.source == .file
+)
+try? ConduitConfig.apply("connect-timeout", "120")
+check(
+    "applying the default removes it instead of writing it",
+    ConduitConfig.resolve("connect-timeout")?.source == .default
+)
+try? ConduitConfig.apply("connect-timeout", "45")
+try? ConduitConfig.apply("connect-timeout", "   ")
+check(
+    "an emptied value means the default too",
+    ConduitConfig.resolve("connect-timeout")?.source == .default
+)
+try? ConduitConfig.apply("poll-interval-idle", "90")
+try? ConduitConfig.apply("poll-interval-idle", "60")
+check(
+    "a file with nothing left to record is removed, not left empty",
+    !FileManager.default.fileExists(atPath: writable)
+)
+
+try? ConduitConfig.set("connect-timeout", to: "45")
+try? ConduitConfig.set("poll-interval-idle", to: "90")
+try? ConduitConfig.resetAll()
+check(
+    "resetting everything returns every setting to its default",
+    ConduitConfig.keys.allSatisfy {
+        ConduitConfig.resolve($0.name)?.source == .default
+    }
+)
+check(
+    "resetting with nothing to reset is not an error",
+    (try? ConduitConfig.resetAll()) != nil
+)
+
+check(
+    "a setting that does not exist is refused rather than written",
+    (try? ConduitConfig.set("not-a-setting", to: "x")) == nil
+)
+
+// Back to the absent file the rest of the checks expect.
+setenv("CONDUIT_CONFIG", NSTemporaryDirectory() + "conduit-smoke-absent.json", 1)
+try? FileManager.default.removeItem(atPath: writable)
+
+// MARK: - Settings window coverage
+//
+// The window generates its fields, but which card a setting belongs to is a
+// human judgement, so a new setting can be added and never assigned a home.
+// The failure is silent and narrow: the setting exists, both surfaces read it,
+// and only the window cannot see it.
+
+check(
+    "every setting is owned by exactly one tab",
+    SettingsTab.ownedKeys.sorted() == ConduitConfig.keys.map(\.name).sorted()
+)
+check(
+    "no setting is claimed by two tabs",
+    Set(SettingsTab.ownedKeys).count == SettingsTab.ownedKeys.count
+)
+check(
+    "every tab has at least one setting to show",
+    SettingsTab.allCases.allSatisfy { !$0.keys.isEmpty }
 )
 
 // MARK: - Sensitivity

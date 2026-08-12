@@ -112,6 +112,15 @@ module ConduitVPN
         default: -> { "true" },
       ),
       Key.new(
+        name: "theme",
+        env: "CONDUIT_THEME",
+        description: "Appearance of the application's own windows: system, " \
+                     "light, or dark. Read by the application only; the " \
+                     "command line has no windows to theme. Anything " \
+                     "unrecognized is treated as system.",
+        default: -> { "system" },
+      ),
+      Key.new(
         name: "log-retention-days",
         env: "CONDUIT_LOG_RETENTION_DAYS",
         description: "Days of the AWS VPN Client's own logs to keep. It " \

@@ -37,6 +37,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Asked at launch rather than at the first interesting moment: a
+        // permission prompt arriving in the same instant as the news it wants
+        // to deliver costs the notification it was asking for.
+        Notifier.requestAuthorization()
+
+        Task { @MainActor in ThemeController.shared.reload() }
+
         Task { @MainActor in VPNStore.shared.start() }
     }
 
@@ -49,10 +56,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ConduitApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @ObservedObject private var store = VPNStore.shared
+    @ObservedObject private var appearance = ThemeController.shared
 
     var body: some Scene {
         MenuBarExtra {
+            // The panel lives in a window macOS owns, so it takes a colour
+            // scheme rather than an NSAppearance. Nil inherits the system one.
             MenuContent(store: store)
+                .preferredColorScheme(appearance.colorScheme)
         } label: {
             // Rendered as a template, so macOS paints it in the menu bar's own
             // foreground colour and it follows the system appearance without a

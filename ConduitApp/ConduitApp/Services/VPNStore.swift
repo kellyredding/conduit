@@ -279,7 +279,15 @@ final class VPNStore: ObservableObject {
             )
             health = .ready
             lastUpdated = Date()
-            lastConnected = Set(profiles.filter(\.isConnected).map(\.name))
+            let nowConnected = Set(profiles.filter(\.isConnected).map(\.name))
+            if hasObserved {
+                announce(
+                    appeared: nowConnected.subtracting(lastConnected),
+                    vanished: lastConnected.subtracting(nowConnected)
+                )
+            }
+            hasObserved = true
+            lastConnected = nowConnected
 
             // A restore is finished when a poll has actually seen the tunnel,
             // not when a connect was accepted — the client accepts an attempt
@@ -324,6 +332,23 @@ final class VPNStore: ObservableObject {
         }
     }
 
+    /// Says what changed, for the changes nobody was in a position to see.
+    ///
+    /// Worded as observation and never as cause. Conduit cannot know why a
+    /// connection ended, and a tunnel torn down deliberately from a terminal
+    /// is indistinguishable from one that collapsed — measured twice, the
+    /// state that would have carried the difference does not survive a poll.
+    private func announce(appeared: Set<String>, vanished: Set<String>) {
+        for name in appeared.sorted() {
+            guard panelInitiated.remove(name) == nil else { continue }
+            Notifier.post(title: "\(name) connected")
+        }
+        for name in vanished.sorted() {
+            guard panelInitiated.remove(name) == nil else { continue }
+            Notifier.post(title: "\(name) disconnected")
+        }
+    }
+
     private func refreshCounters() async {
         for profile in profiles where profile.isConnected {
             guard !Task.isCancelled else { return }
@@ -337,6 +362,22 @@ final class VPNStore: ObservableObject {
     }
 
     // MARK: - Actions
+
+    /// Changes the person is already watching, so the announcement is skipped.
+    ///
+    /// Only the panel populates this. A restore deliberately does not: the
+    /// whole premise of restoring is that nobody was there. Entries are
+    /// consumed by the transition they predicted, and cleared on an attempt
+    /// that ended without one, so a connect that failed cannot leave a mark
+    /// that silences the next connection somebody else makes.
+    private var panelInitiated: Set<String> = []
+
+    /// Whether a first successful reading has been taken.
+    ///
+    /// Without it, launching would announce every tunnel already up as though
+    /// it had just happened — and one usually is, because the app can be
+    /// restarted underneath a live connection and reconciles it into view.
+    private var hasObserved = false
 
     /// What an attempt has to say for itself beyond its status: the browser
     /// hint while it waits, or why it ended if it ended badly. Keyed by
@@ -373,6 +414,11 @@ final class VPNStore: ObservableObject {
         notes[name] = nil
         activeAttempts.insert(name)
         attemptsInProgress.insert(name)
+        // The target, and whatever the release below takes down on the way.
+        // Both are changes this person is making with the panel open in front
+        // of them, so neither is news.
+        panelInitiated.insert(name)
+        panelInitiated.formUnion(lastConnected)
         attemptTasks[name] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.finishAttempt(name) }
@@ -405,12 +451,20 @@ final class VPNStore: ObservableObject {
                 self.notes[name] = nil
             case .failed:
                 self.notes[name] = "Could not connect"
+                self.panelInitiated.remove(name)
+                Notifier.post(title: "\(name) could not connect")
             case .timedOut:
                 // Not a failure. Sign-in happens in a browser, so giving up
                 // watching says nothing about whether it will still land, and
                 // wording it as a loss would be a guess.
                 self.notes[name] = "Still trying — stopped watching"
+                self.panelInitiated.remove(name)
+                Notifier.post(
+                    title: "\(name) is taking longer than expected",
+                    body: "Sign-in may still be waiting in your browser."
+                )
             case .cancelled:
+                self.panelInitiated.remove(name)
                 await self.release(name)
             }
         }
@@ -422,6 +476,7 @@ final class VPNStore: ObservableObject {
         notes[name] = nil
         activeAttempts.insert(name)
         attemptsInProgress.insert(name)
+        panelInitiated.insert(name)
         attemptTasks[name] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.finishAttempt(name) }
@@ -438,7 +493,10 @@ final class VPNStore: ObservableObject {
                 interval: Self.number("poll-interval-active", 2),
                 onEvent: self.forward(to: name)
             )
-            if outcome == .timedOut { self.notes[name] = "Still tearing down" }
+            if outcome == .timedOut {
+                self.notes[name] = "Still tearing down"
+                self.panelInitiated.remove(name)
+            }
         }
     }
 
@@ -618,6 +676,12 @@ final class VPNStore: ObservableObject {
             Self.log.error(
                 "restore gave up after \(self.restoreAttempts, privacy: .public) attempts"
             )
+            for name in restoreWanted.sorted() {
+                Notifier.post(
+                    title: "\(name) did not come back",
+                    body: "It was connected before your Mac slept."
+                )
+            }
             restorePending = false
             return
         }

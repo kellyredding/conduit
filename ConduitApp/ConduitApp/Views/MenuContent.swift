@@ -12,6 +12,10 @@ struct MenuContent: View {
     /// was protecting is the one nobody should give by accident.
     @State private var confirming: String?
 
+    /// The panel's own window, so Escape can close it.
+    @State private var panelWindow: NSWindow?
+    @State private var escapeMonitor: Any?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // "Conduit VPN" rather than "Conduit": the panel can be opened
@@ -53,8 +57,57 @@ struct MenuContent: View {
         }
         .padding(14)
         .frame(width: 320)
-        .onAppear { store.menuOpened() }
-        .onDisappear { store.menuClosed() }
+        // The same surface the settings window sits on.
+        //
+        // Left alone, this panel is drawn on a system vibrancy material: it is
+        // translucent, so it takes a tint from whatever happens to be behind
+        // it and never quite matches a window of ours. Painting the semantic
+        // window colour over it makes the two read as one piece of software,
+        // and being semantic it resolves for light and dark without either
+        // being named here.
+        .background(Color(nsColor: .windowBackgroundColor))
+        .background(WindowAccessor { panelWindow = $0 })
+        .onAppear {
+            store.menuOpened()
+            startWatchingForEscape()
+        }
+        .onDisappear {
+            store.menuClosed()
+            stopWatchingForEscape()
+        }
+    }
+
+    /// Escape closes the panel, the same as it closes the settings window.
+    ///
+    /// Monitored rather than handled through the responder chain because the
+    /// hosting view swallows the keystroke before it gets there — the same
+    /// reason the settings window monitors for it.
+    ///
+    /// Torn down when the panel goes away, so this is never watching while
+    /// there is nothing to close.
+    private func startWatchingForEscape() {
+        guard escapeMonitor == nil else { return }
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 53 else { return event }
+
+            // Dismissed the way clicking the item dismisses it, rather than by
+            // hiding the window underneath SwiftUI. Only that path updates
+            // what SwiftUI believes about the panel, and the item's selected
+            // state is drawn from that belief.
+            if !MenuBarItem.dismissPanel() {
+                // No status item found. The panel closing matters more than
+                // the highlight, so fall back to hiding the window.
+                panelWindow?.orderOut(nil)
+            }
+            return nil
+        }
+    }
+
+    private func stopWatchingForEscape() {
+        if let escapeMonitor {
+            NSEvent.removeMonitor(escapeMonitor)
+        }
+        escapeMonitor = nil
     }
 
     /// A transitional profile disconnects rather than connects, because that is
@@ -92,30 +145,63 @@ struct MenuContent: View {
             .padding(.vertical, 8)
     }
 
+    /// Glyphs rather than words. Every one of these is a verb the whole system
+    /// already spells this way, and the row reads as a set of controls instead
+    /// of a sentence competing with the profile names above it. Each keeps a
+    /// tooltip and an accessibility label, because a bare symbol says nothing
+    /// to anyone navigating by voice or by screen reader.
+    ///
+    /// Grouped by what they touch: the two that concern the application sit
+    /// together on the left, and leaving it sits alone on the right, where a
+    /// mis-click costs the least.
     private var footer: some View {
-        HStack {
-            // A glyph rather than a word: refreshing is the one thing here
-            // that repeats, and the symbol is already understood everywhere
-            // else it appears. The label survives for anyone navigating by
-            // voice or by screen reader, where a bare arrow says nothing.
-            Button {
-                store.refreshNow()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Refresh now")
-            .accessibilityLabel("Refresh")
+        HStack(spacing: 14) {
+            glyph(
+                "gearshape.fill",
+                help: "Settings",
+                shortcut: ",",
+                action: { PreferencesWindowController.showPreferences() }
+            )
+            glyph(
+                "arrow.clockwise",
+                help: "Refresh now",
+                action: { store.refreshNow() }
+            )
 
             Spacer()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .keyboardShortcut("q")
+
+            glyph(
+                "power",
+                help: "Quit",
+                shortcut: "q",
+                action: { NSApplication.shared.terminate(nil) }
+            )
         }
         .font(.callout)
+    }
+
+    @ViewBuilder
+    private func glyph(
+        _ symbol: String,
+        help: String,
+        shortcut: KeyEquivalent? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        let button = Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(help)
+        .accessibilityLabel(help)
+
+        if let shortcut {
+            button.keyboardShortcut(shortcut)
+        } else {
+            button
+        }
     }
 }
 
@@ -278,5 +364,80 @@ private struct ProfileRow: View {
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         return "↓\(formatter.string(fromByteCount: counters.tunnelIn))"
             + "  ↑\(formatter.string(fromByteCount: counters.tunnelOut))"
+    }
+}
+
+/// The menu bar item, and the only handle there is on it.
+///
+/// Three attempts went at the selected state directly — clearing the button's
+/// highlight, clearing its state, deactivating the application — and every one
+/// of them failed for the same reason: the panel was being closed behind
+/// SwiftUI's back, so SwiftUI went on believing it was presented and kept
+/// drawing the item to match. The state was never the thing to fix.
+///
+/// Clicking the button is the path SwiftUI itself uses. It toggles the panel
+/// shut and updates the item together, because to SwiftUI nothing unusual has
+/// happened. Only ever sent while the panel is open, so the toggle can only
+/// close it.
+///
+/// Measured, not assumed: the status item is reachable from this process as an
+/// `NSStatusBarWindow` at window level 25, holding exactly one button.
+///
+/// Matched by class name because MenuBarExtra hands out no reference to the
+/// status item it creates, which makes this the most fragile thing in the
+/// file. It reports whether it found anything rather than failing silently, so
+/// the caller can still close the panel the blunt way.
+enum MenuBarItem {
+    @MainActor
+    @discardableResult
+    static func dismissPanel() -> Bool {
+        for window in NSApp.windows
+        where String(describing: type(of: window)).contains("NSStatusBarWindow") {
+            if let button = firstButton(in: window.contentView) {
+                button.performClick(nil)
+                return true
+            }
+        }
+        return false
+    }
+
+    @MainActor
+    private static func firstButton(in view: NSView?) -> NSButton? {
+        guard let view else { return nil }
+        if let button = view as? NSButton { return button }
+        for subview in view.subviews {
+            if let found = firstButton(in: subview) { return found }
+        }
+        return nil
+    }
+}
+
+/// Hands back the NSWindow hosting a SwiftUI view.
+///
+/// The menu bar panel is presented in a window macOS owns, and nothing in
+/// SwiftUI's vocabulary dismisses it: there is no presentation binding for a
+/// window-styled MenuBarExtra, and the dismiss action does not reach it. So the
+/// window is taken from the view hierarchy and ordered out directly.
+///
+/// Reaching for the key window instead would be one line and wrong — the panel
+/// is not always key, and closing whatever is would be its own bug.
+struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { onResolve(view.window) }
+        return view
+    }
+
+    /// Resolved here as well as on creation, and that is the whole point.
+    ///
+    /// A view is not in a window when it is made, so the lookup has to wait —
+    /// but waiting once is not enough either: if that first hop still finds no
+    /// window, nothing ever asks again and the reference stays nil forever.
+    /// Which is exactly what happened, silently, and left the code that
+    /// depended on it doing nothing at all.
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { onResolve(nsView.window) }
     }
 }
