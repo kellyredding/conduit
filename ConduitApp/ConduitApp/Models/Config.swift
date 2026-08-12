@@ -108,6 +108,19 @@ enum ConduitConfig {
             defaultValue: { "15" }
         ),
         Key(
+            name: "restore-on-wake",
+            env: "CONDUIT_RESTORE_ON_WAKE",
+            description: """
+                Whether the application re-establishes connections that were \
+                live when the machine went to sleep. The client attempts this \
+                itself and does it too early, before the network returns, then \
+                refuses every subsequent attempt for about ten minutes. Read \
+                by the application only; the command line never restores \
+                anything.
+                """,
+            defaultValue: { "true" }
+        ),
+        Key(
             name: "log-retention-days",
             env: "CONDUIT_LOG_RETENTION_DAYS",
             description: """
@@ -179,6 +192,15 @@ enum ConduitConfig {
 
     static func seconds(_ name: String) -> TimeInterval {
         TimeInterval(int(name) ?? 0)
+    }
+
+    /// Anything that is not an explicit denial reads as enabled. A setting
+    /// whose default is on should stay on when it is misspelled, because the
+    /// alternative is a feature that silently disappears on a typo.
+    static func bool(_ name: String) -> Bool {
+        !["false", "no", "0", "off"].contains(
+            get(name).trimmingCharacters(in: .whitespaces).lowercased()
+        )
     }
 
     /// Path-valued settings are expanded here rather than at each call site, so

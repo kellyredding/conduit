@@ -100,6 +100,18 @@ module ConduitVPN
         default: -> { "15" },
       ),
       Key.new(
+        name: "restore-on-wake",
+        env: "CONDUIT_RESTORE_ON_WAKE",
+        description: "Whether the application re-establishes connections " \
+                     "that were live when the machine went to sleep. The " \
+                     "client attempts this itself and does it too early, " \
+                     "before the network returns, then refuses every " \
+                     "subsequent attempt for about ten minutes. Read by the " \
+                     "application only; the command line never restores " \
+                     "anything.",
+        default: -> { "true" },
+      ),
+      Key.new(
         name: "log-retention-days",
         env: "CONDUIT_LOG_RETENTION_DAYS",
         description: "Days of the AWS VPN Client's own logs to keep. It " \

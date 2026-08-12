@@ -154,7 +154,12 @@ private struct ProfileRow: View {
     // attempt is running, and two places naming it separately is how they
     // come to disagree.
     private var indicator: String {
-        if profile.isInFlight { return MenuIconState.connecting.symbolName }
+        // The same question the bar asks, so a row cannot claim a profile is
+        // settling while the bar says nothing is happening.
+        let configured = ConduitConfig.seconds("connect-timeout")
+        if profile.isSettling(within: configured > 0 ? configured : 120) {
+            return MenuIconState.connecting.symbolName
+        }
         return profile.isConnected ? "bolt.horizontal.circle.fill" : "circle.dashed"
     }
 

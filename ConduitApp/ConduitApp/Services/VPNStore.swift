@@ -1,18 +1,21 @@
 import AppKit
 import Foundation
 import Network
+import os
 
 /// What the menu bar knows, kept current by polling.
-///
-/// **Read-only.** This store cannot start or stop a connection, because the
-/// client it holds exposes no way to. That is a property of the types rather
-/// than a matter of care, so it cannot lapse by accident.
 ///
 /// The governing idea is reconciliation, not ownership. Conduit is never the
 /// only actor: connections are made and torn down from terminals and by other
 /// tools, and one is often already live when this launches. So the store
 /// renders whatever the client reports and never assumes a state because it
 /// asked for one.
+///
+/// It acts in exactly one circumstance: restoring, after a wake, connections
+/// that were live before the machine slept. Everything else here still only
+/// reads. Reconciliation survives the change — a restore is issued and then
+/// forgotten, and what the menu shows afterwards comes from the client like
+/// everything else, never from the fact that a connect was requested.
 @MainActor
 final class VPNStore: ObservableObject {
     static let shared = VPNStore()
@@ -26,7 +29,23 @@ final class VPNStore: ObservableObject {
     @Published private(set) var counters: [String: VPNByteCounters] = [:]
 
     var iconState: MenuIconState {
-        MenuIcon.state(for: profiles, health: health)
+        MenuIcon.state(for: profiles, health: health, settling: isSettling)
+    }
+
+    /// Something is changing: Conduit's own action, a restore not yet confirmed,
+    /// or any transition still moving — whoever started it.
+    ///
+    /// The middle case exists because a restore is not over when `connect`
+    /// returns. The client accepts an attempt and exits 0 several seconds
+    /// before a tunnel exists, which left the bar hollow for nine seconds in
+    /// the middle of an attempt Conduit was itself driving.
+    var isSettling: Bool {
+        if !activeAttempts.isEmpty { return true }
+        if restorePending, restoreAttempts > 0 { return true }
+        let configured = ConduitConfig.seconds("connect-timeout")
+        return profiles.contains {
+            $0.isSettling(within: configured > 0 ? configured : 120)
+        }
     }
 
     private let client: VPNClient
@@ -60,6 +79,80 @@ final class VPNStore: ObservableObject {
     private var lastEventRefresh = Date.distantPast
     private let eventRefreshMinimumGap: TimeInterval = 3
 
+    // MARK: - Restore on wake
+    //
+    // Sleep kills every tunnel, and the client notices about six seconds after
+    // the machine wakes — reliably before the network is back. Its attempt
+    // fails there, and then holds the profile against replacement for roughly
+    // ten minutes, answering "Already connected to profile" the entire time
+    // while no route, no interface address and no bytes exist. Measured twice.
+    //
+    // So the difference between this and what the client already does is one
+    // step: waiting for a usable network before asking. That wait is an event
+    // rather than a delay, which is what keeps a threshold out of it.
+
+    /// Restore decisions only, one line per event rather than per poll.
+    ///
+    /// A wake happens once and cannot be replayed, so a restore that silently
+    /// does nothing costs an entire sleep cycle to diagnose — from outside the
+    /// process, one that never armed and one that armed and declined look
+    /// identical. Three separate defects were each found in a single cycle
+    /// because these lines named the step that stopped, which is the whole
+    /// reason they survive rather than being scaffolding that got deleted.
+    ///
+    /// This is the unified log, which macOS bounds and rotates itself. It is
+    /// not the vendor's log directory, which grows a file per day and is
+    /// pruned by ClientLogs, so nothing here contributes to that.
+    ///
+    /// Profile names are deliberately absent: this is a public repository and
+    /// the unified log is readable by anything on the machine. Counts carry
+    /// the whole diagnostic value.
+    nonisolated static let log = Logger(
+        subsystem: "com.kellyredding.Conduit", category: "restore"
+    )
+
+    /// The last observation of what was connected, kept current by polling.
+    /// The sleep notification is the precise signal and this is the durable
+    /// one: it survives a notification that never arrives, which is not
+    /// hypothetical — nothing guarantees `willSleep` is delivered before power
+    /// is cut, and the restore should not depend on a courtesy.
+    private var lastConnected: Set<String> = []
+
+    /// Names that were connected when the lid closed. Held only in memory, on
+    /// purpose: a relaunched Conduit has no business restoring a connection it
+    /// never saw. Read-only operation means a tunnel outlives the app, and a
+    /// fresh launch reconciles that tunnel into view without having asked for
+    /// it — the same reasoning says it must not resurrect one either.
+    private var connectedBeforeSleep: Set<String> = []
+
+    /// Set at wake, cleared when every wanted profile is confirmed connected or
+    /// the attempts run out.
+    private var restorePending = false
+
+    /// Wanted but not yet confirmed. Names leave this set only when a poll has
+    /// actually observed them connected — never because a connect was accepted,
+    /// which says an attempt started and nothing more.
+    private var restoreWanted: Set<String> = []
+
+    /// One attempt is not enough, because there is no reliable signal for "the
+    /// network is usable again". A satisfied path means a route exists, and
+    /// measured, the first one arrives 68 ms after waking — describing the
+    /// network the machine had before it slept. So each subsequent path event
+    /// gets another try, which converges without a timer: path events stop once
+    /// the network settles. The cap exists only so a flapping interface cannot
+    /// drive this indefinitely, since every attempt is a browser round-trip.
+    private var restoreAttempts = 0
+    private let restoreMaxAttempts = 4
+
+    /// Attempts take about nine seconds and path events arrive faster than
+    /// that, so without this a settling network starts several at once.
+    private var restoreInFlight = false
+
+    /// Profiles Conduit is itself acting on. This is the only in-flight signal
+    /// worth having: it is a fact the store owns rather than an inference about
+    /// whether somebody else's transition is still alive.
+    @Published private(set) var activeAttempts: Set<String> = []
+
     init(client: VPNClient? = nil) {
         self.client = client ?? VPNClient.fromConfiguration()
     }
@@ -68,6 +161,11 @@ final class VPNStore: ObservableObject {
 
     func start() {
         guard pollTask == nil else { return }
+        // Also the positive control for this log: if a wake produces no restore
+        // line, this one still being present proves the code did not run rather
+        // than that the logging did not.
+        Self.log.notice("store started")
+        observeSleep()
         observeWake()
         observeNetwork()
         restartPolling()
@@ -90,8 +188,20 @@ final class VPNStore: ObservableObject {
     // almost always, and at rest a single call covers every profile: absence
     // from the connection listing is itself the answer for the rest.
 
+    // Keyed on the same question the bar asks: is anything actually moving.
+    //
+    // Both previous rules were wrong in opposite directions. Keying on any
+    // transitional state watched an abandoned attempt at the active rate for
+    // the ten minutes it took to expire. Keying on Conduit's own attempts left
+    // a connection started from a terminal — which is most of them — invisible
+    // for a full idle interval, measured at 51 seconds with a tunnel already
+    // carrying traffic.
+    //
+    // Asking whether the transition is still moving gets both: a live one is
+    // watched closely whoever started it, and an abandoned one drops back to
+    // resting without waiting out the client's timeout.
     private var interval: TimeInterval {
-        let name = menuIsOpen || profiles.contains(where: \.isInFlight)
+        let name = menuIsOpen || isSettling
             ? "poll-interval-active"
             : "poll-interval-idle"
         let seconds = ConduitConfig.seconds(name)
@@ -169,6 +279,30 @@ final class VPNStore: ObservableObject {
             )
             health = .ready
             lastUpdated = Date()
+            lastConnected = Set(profiles.filter(\.isConnected).map(\.name))
+
+            // A restore is finished when a poll has actually seen the tunnel,
+            // not when a connect was accepted — the client accepts an attempt
+            // and exits 0 long before there is anything to show for it.
+            //
+            // Only after an attempt has run *and finished*. This is the third
+            // place the same mistake appeared: any reading taken between the
+            // wake and the first disconnect describes the network the machine
+            // had before it slept, and code that consults it concludes the
+            // tunnel is fine. Here it logged "confirmed after 0 attempts" 52 ms
+            // after arming and stood the whole restore down. Requiring a
+            // completed attempt makes the reading trustworthy structurally: the
+            // disconnect that starts every attempt destroys any stale
+            // Connected, so anything seen afterwards is genuinely current.
+            if restorePending, restoreAttempts > 0, !restoreInFlight {
+                restoreWanted.subtract(lastConnected)
+                if restoreWanted.isEmpty {
+                    restorePending = false
+                    Self.log.notice(
+                        "restore confirmed after \(self.restoreAttempts, privacy: .public) attempt(s)"
+                    )
+                }
+            }
 
             if menuIsOpen {
                 await refreshCounters()
@@ -204,6 +338,38 @@ final class VPNStore: ObservableObject {
 
     // MARK: - Triggers
 
+    /// The last moment the pre-sleep truth is still observable. Taken from the
+    /// most recent poll rather than by asking the client, because the machine
+    /// is on its way down and a subprocess may not return before it stops.
+    ///
+    /// Captured **synchronously**. This first hopped to the MainActor through a
+    /// `Task`, which is correct-looking and does not work: the notification
+    /// arrives with a moment left before the machine suspends, and the next
+    /// scheduling point never came. Measured — the wake half of the same
+    /// pattern ran fine and produced a poll 0.55 s after waking, while this one
+    /// never ran at all, so the restore had nothing to restore and every later
+    /// trigger correctly declined to act.
+    private func observeSleep() {
+        let center = NSWorkspace.shared.notificationCenter
+        observers.append(
+            center.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.connectedBeforeSleep = Set(
+                        self.profiles.filter(\.isConnected).map(\.name)
+                    )
+                    Self.log.notice(
+                        "sleep: remembered \(self.connectedBeforeSleep.count, privacy: .public) connected"
+                    )
+                }
+            }
+        )
+    }
+
     private func observeWake() {
         let center = NSWorkspace.shared.notificationCenter
         observers.append(
@@ -212,21 +378,154 @@ final class VPNStore: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                // Status after a wake is the least trustworthy reading there
-                // is: the tunnel may have died while the machine slept and
-                // nothing will announce it.
-                Task { @MainActor in self?.refreshNow() }
+                Task { @MainActor in
+                    guard let self else { return }
+
+                    // Read the memory before anything refreshes over it. The
+                    // sleep notification is the precise source; the polled one
+                    // is the source that is always there.
+                    let remembered = self.connectedBeforeSleep.isEmpty
+                        ? self.lastConnected
+                        : self.connectedBeforeSleep
+                    self.connectedBeforeSleep = []
+                    self.restoreWanted = remembered
+                    self.restoreAttempts = 0
+
+                    // Arm the restore. It deliberately does not run here —
+                    // firing at wake is precisely the client's mistake.
+                    let enabled = ConduitConfig.bool("restore-on-wake")
+                    self.restorePending = enabled && !remembered.isEmpty
+                    Self.log.notice(
+                        """
+                        wake: enabled=\(enabled, privacy: .public) \
+                        remembered=\(remembered.count, privacy: .public) \
+                        armed=\(self.restorePending, privacy: .public)
+                        """
+                    )
+
+                    // Status right after a wake is the least trustworthy
+                    // reading there is: measured, the client went on claiming
+                    // Connected for six seconds with the network gone the whole
+                    // time. So this look is for the menu, and nothing decides
+                    // anything on what it returns.
+                    self.refreshNow()
+                }
             }
         )
     }
 
     private func observeNetwork() {
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] _ in
-            Task { @MainActor in self?.refreshAfterEvent() }
+        monitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            Task { @MainActor in
+                self?.refreshAfterEvent()
+                if satisfied { self?.restoreIfArmed() }
+            }
         }
         monitor.start(queue: DispatchQueue(label: "conduit.network.path"))
         pathMonitor = monitor
+    }
+
+    /// Waits for a path *update* reporting satisfaction rather than reading the
+    /// current path at wake, because the value standing there at that instant
+    /// describes the network the machine had before it slept. Whether this is
+    /// late enough is the open question the design rests on: satisfied means a
+    /// usable route exists, which is not quite the same as every layer above it
+    /// being ready. It is the earliest deterministic signal available, and the
+    /// alternative is a number chosen by feel.
+    private func restoreIfArmed() {
+        guard restorePending, !restoreInFlight else { return }
+
+        // Never interrupt an attempt that is still going. Establishing a tunnel
+        // generates path events, so without this the event raised by attempt
+        // one arriving would start attempt two, whose disconnect would tear
+        // down the tunnel attempt one was most of the way through building —
+        // a retry that destroys its own work, repeating until the cap.
+        //
+        // Asking whether it is still *moving* rather than merely transitional
+        // is what makes the retry reachable at all. An abandoned attempt is
+        // transitional for ten minutes, so testing that would decline every
+        // retry for the whole timeout — the retry would exist and never run.
+        let configured = ConduitConfig.seconds("connect-timeout")
+        let window = configured > 0 ? configured : 120
+        if restoreWanted.contains(where: { name in
+            profiles.first { $0.name == name }?.isSettling(within: window) ?? false
+        }) {
+            // Debug rather than notice: this fires once per path event during
+            // an attempt — four times in a normal wake — and says only that a
+            // guard did its job. It stays because it is the evidence if the
+            // retry ever misbehaves, but it does not belong in the persisted
+            // record of what happened.
+            Self.log.debug("attempt still settling: not interrupting")
+            return
+        }
+        guard restoreAttempts < restoreMaxAttempts else {
+            Self.log.error(
+                "restore gave up after \(self.restoreAttempts, privacy: .public) attempts"
+            )
+            restorePending = false
+            return
+        }
+        restoreAttempts += 1
+        restoreInFlight = true
+        Self.log.notice(
+            "path satisfied: attempt \(self.restoreAttempts, privacy: .public)"
+        )
+        Task { await restore() }
+    }
+
+    /// One pass over everything still wanted. Called again by the next
+    /// satisfied path event if a poll has not yet seen the tunnel appear.
+    private func restore() async {
+        defer { restoreInFlight = false }
+
+        // Deliberately no "is it already connected?" check here. For the first
+        // seconds after a wake there is no trustworthy answer to that question:
+        // the store's own copy is the pre-sleep reading, and the client's is
+        // stale too — measured, it went on reporting Connected for six seconds
+        // with the network gone the entire time. A check against either one
+        // concludes the tunnel survived and stands down, which is exactly what
+        // happened and why nothing was restored.
+        //
+        // So the sequence just runs. It is idempotent in outcome — the profile
+        // ends up connected either way — and the only thing it costs, in the
+        // narrow case where the connection genuinely did come back on its own
+        // first, is rebuilding a tunnel that was seconds old.
+        for name in restoreWanted.sorted() {
+            activeAttempts.insert(name)
+            defer { activeAttempts.remove(name) }
+
+            // Release first. A stalled attempt holds the profile against any
+            // replacement, and this is the only thing that clears it. Harmless
+            // when the profile is genuinely idle, which is why it is not worth
+            // branching on a status that may be seconds out of date anyway.
+            do {
+                try await client.disconnect(profile: name)
+                Self.log.notice("released a held profile")
+            } catch {
+                // Expected when the profile was simply idle.
+                Self.log.notice("nothing to release")
+            }
+
+            // No carve-out for sensitive profiles. The confirmation gate exists
+            // to stop one being *established* without deliberate intent; this
+            // restores intent already expressed, and sleep is an interruption
+            // rather than a decision to disconnect. Skipping them would also
+            // make "am I on the VPN after sleep?" depend on which VPN, with the
+            // exception landing on the one where being wrong costs most.
+            do {
+                try await client.connect(profile: name)
+                Self.log.notice("connect accepted")
+            } catch {
+                Self.log.error(
+                    "connect refused: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        Self.log.notice("restore finished")
+        refreshNow()
     }
 
     /// The monitor reports every path update, and most say nothing about

@@ -76,6 +76,39 @@ struct ProfileState: Equatable, Sendable {
     var label: String { status?.label ?? rawStatus }
     var isConnected: Bool { status == .connected }
     var isInFlight: Bool { status?.isTransitional ?? false }
+
+    /// Whether a transition is plausibly still in motion, as opposed to one the
+    /// client has abandoned in place.
+    ///
+    /// Both look identical in a status response — the only thing separating a
+    /// connect that is working from one that is stuck is how long it has sat
+    /// there, so a duration is not an arbitrary choice here but the only
+    /// available signal. `updated-at` marks the last state *change*, not a
+    /// heartbeat, so its age is exactly "how long have we been here".
+    ///
+    /// The two populations are not close: a connect runs 9–18 seconds end to
+    /// end, and an abandoned attempt sits for 598. Any bound between them
+    /// behaves the same, which is why this reuses `connect-timeout` — already
+    /// defined as the longest an attempt may legitimately take — rather than
+    /// introducing a number of its own.
+    ///
+    /// An unparseable or absent timestamp reads as in motion. Every listed
+    /// transitional profile carries one, so this is a fallback for a client
+    /// that changes its format, and in that case saying "something is
+    /// happening" is the smaller error.
+    func isSettling(within seconds: TimeInterval, now: Date = Date()) -> Bool {
+        guard isInFlight else { return false }
+        guard let updatedAt, let moved = ProfileState.parse(updatedAt) else {
+            return true
+        }
+        return now.timeIntervalSince(moved) <= seconds
+    }
+
+    static func parse(_ timestamp: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: timestamp)
+    }
 }
 
 /// Whether the client itself can be reached at all, which is a different
@@ -92,22 +125,36 @@ enum ClientHealth: Equatable, Sendable {
 }
 
 enum MenuIcon {
-    /// Highest wins.
+    /// The bar reports connectivity, not activity.
     ///
-    /// `connecting` outranks `connected` because it is the transient one: a
-    /// settled tunnel will still be there in two seconds, while the window in
-    /// which something is actively changing is the whole of what it has to
-    /// report.
+    /// Exactly one status means a tunnel exists: `Connected`. Every other one —
+    /// `NotConnected`, `Connecting`, `WaitingForIdentity`, `Disconnecting`,
+    /// `Reconnecting` — means no route, no interface address and no bytes,
+    /// verified against the route table during a ten-minute stall. So the bar
+    /// is a pure function of that one fact, with no clock in it.
+    ///
+    /// `settling` outranks a live tunnel, because a settled tunnel will still
+    /// be there in two seconds while the window in which something is changing
+    /// is the whole of what the bar has to report.
+    ///
+    /// This briefly keyed on Conduit's own attempts alone, after the settling
+    /// glyph was found stuck for ten minutes on a dead tunnel. That fixed the
+    /// lie by discarding the signal: a connect started from a terminal — which
+    /// is most of them — then showed nothing at all until it completed.
+    /// `ProfileState.isSettling` is the version that keeps both, by asking
+    /// whether the transition is still moving rather than whether Conduit
+    /// started it.
     ///
     /// Sensitivity is deliberately absent. Whether a live tunnel is one that
     /// warranted saying yes to does not change what the bar shows, because no
     /// glyph tested could carry that at this size — the panel says it instead.
     static func state(
         for profiles: [ProfileState],
-        health: ClientHealth
+        health: ClientHealth,
+        settling: Bool = false
     ) -> MenuIconState {
         if health.isUnavailable { return .error }
-        if profiles.contains(where: \.isInFlight) { return .connecting }
+        if settling { return .connecting }
         if profiles.contains(where: \.isConnected) { return .connected }
         return .idle
     }

@@ -156,6 +156,7 @@ let expectedKeys = [
     "poll-interval-idle",
     "connect-timeout",
     "identity-hint-after",
+    "restore-on-wake",
     "log-retention-days",
     "log-max-megabytes",
     "connect-grace-polls",
@@ -187,14 +188,22 @@ check("a broken pattern is distinguishable from an empty one", !Sensitivity.patt
 
 // MARK: - Menu icon reduction
 
-func state(_ name: String, _ status: VPNStatus?, sensitive: Bool = false)
-    -> ProfileState
-{
-    ProfileState(
+func state(
+    _ name: String,
+    _ status: VPNStatus?,
+    sensitive: Bool = false,
+    movedSecondsAgo: TimeInterval? = nil
+) -> ProfileState {
+    let stamp = movedSecondsAgo.map { ago -> String in
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: Date().addingTimeInterval(-ago))
+    }
+    return ProfileState(
         name: name,
         status: status,
         rawStatus: status?.rawValue ?? "Unknown",
-        updatedAt: nil,
+        updatedAt: stamp,
         isSensitive: sensitive
     )
 }
@@ -227,21 +236,54 @@ check(
     "the rule still exists, and still has a mark for the panel",
     !Sensitivity.markSymbolName.isEmpty && Sensitivity.isSensitive("Prod-Alpha")
 )
-// Transient, and it resolves in seconds; a steady mark during the one window
-// where something is actively changing would be the wrong report.
 check(
-    "an attempt in flight outranks a live tunnel",
+    "something settling outranks a live tunnel",
     MenuIcon.state(
-        for: [state("Prod", .connected, sensitive: true), state("Alpha", .connecting)],
-        health: .ready
+        for: [state("Prod", .connected, sensitive: true)],
+        health: .ready,
+        settling: true
     ) == .connecting
 )
 check(
-    "sign-in counts as in flight",
+    "nothing settling lets the live tunnel read through",
     MenuIcon.state(
-        for: [state("Alpha", .waitingForIdentity)],
-        health: .ready
-    ) == .connecting
+        for: [state("Prod", .connected, sensitive: true), state("Alpha", .connecting)],
+        health: .ready,
+        settling: false
+    ) == .connected
+)
+
+// MARK: - Live transition vs abandoned one
+//
+// The distinction the bar rests on. Both are transitional statuses and nothing
+// in a status response separates them except how long the state has sat, so
+// these two checks are the whole of what keeps the bar from either lying for
+// ten minutes or going silent during a nine-second connect.
+
+let window: TimeInterval = 120
+
+check(
+    "a transition that just moved is settling",
+    state("Alpha", .waitingForIdentity, movedSecondsAgo: 3).isSettling(within: window)
+)
+check(
+    "one still moving well inside a connect's duration is settling",
+    state("Alpha", .connecting, movedSecondsAgo: 18).isSettling(within: window)
+)
+// Measured: an abandoned attempt held WaitingForIdentity for 598 seconds with
+// its timestamp frozen at the moment it entered, while a real connect runs
+// 9-18 seconds end to end. The bound separates two populations 30x apart.
+check(
+    "an abandoned attempt is not settling",
+    !state("Alpha", .waitingForIdentity, movedSecondsAgo: 598).isSettling(within: window)
+)
+check(
+    "a resting profile is never settling, however fresh",
+    !state("Alpha", .connected, movedSecondsAgo: 1).isSettling(within: window)
+)
+check(
+    "an unreadable timestamp reads as settling rather than as nothing happening",
+    state("Alpha", .connecting).isSettling(within: window)
 )
 check(
     "an unreachable client outranks everything",

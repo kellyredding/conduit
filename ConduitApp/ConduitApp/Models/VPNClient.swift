@@ -69,9 +69,6 @@ actor VPNClient {
     }
 
     // MARK: - Queries
-    //
-    // Read-only by construction: this type exposes no way to start or stop a
-    // connection. Adding one is a deliberate act, not an oversight.
 
     func listProfiles() async throws -> [VPNProfile] {
         try decode(try await capture(["list-profiles"]), as: VPNPayload.profiles)
@@ -94,6 +91,34 @@ actor VPNClient {
             try await capture(arguments),
             as: VPNPayload.connectionStatus
         )
+    }
+
+    // MARK: - Actions
+    //
+    // This type was read-only by construction for its first three phases: it
+    // exposed no way to start or stop a connection, so the guarantee could not
+    // lapse through carelessness. The comment that said so also said adding one
+    // would be a deliberate act. This is that act, and the reason is narrow.
+    //
+    // After a wake the client starts an attempt of its own before the network
+    // has returned, fails, and then answers every further attempt with
+    // "Already connected to profile" for about ten minutes while no tunnel
+    // exists. Clearing that state is the only way to reconnect, and it needs
+    // both verbs: `disconnect` to release the stalled attempt and `connect` to
+    // replace it. See Phase 4 of the plan for the measurements.
+
+    /// Starts an attempt. Returns as soon as the client accepts it, which is
+    /// not success — the client reports an attempt *started* and exits 0. Only
+    /// polling to a terminal state can say whether a tunnel exists.
+    func connect(profile: String) async throws {
+        _ = try await capture(["connect", "--profile-name", profile])
+    }
+
+    /// Tears a connection down, and equally releases a stalled attempt that is
+    /// holding the profile against a replacement. Prints nothing on success;
+    /// the exit code is the only signal, which `capture` already translates.
+    func disconnect(profile: String) async throws {
+        _ = try await capture(["disconnect", "--profile-name", profile])
     }
 
     // MARK: - Invocation
