@@ -14,6 +14,7 @@ audit:
 # --- Crystal CLI ---
 
 cli-build:   ; $(MAKE) -C tools/conduit-vpn build
+cli-check:   ; $(MAKE) -C tools/conduit-vpn check
 cli-dev:     ; $(MAKE) -C tools/conduit-vpn dev
 cli-test:    ; $(MAKE) -C tools/conduit-vpn test
 cli-lint:    ; $(MAKE) -C tools/conduit-vpn lint
@@ -37,7 +38,11 @@ build:   cli-build app-build
 install: cli-install app-install
 clean:   cli-clean app-clean
 
-check:  audit cli-lint cli-test cli-build
+# Delegates rather than restating the CLI's own gate. Spelling the steps out
+# here once meant they drifted: this ran the specs and only then rebuilt the
+# binary they exercise, so every run tested the previous build. A suite that
+# reports on code that is no longer there is worse than no suite.
+check:  audit cli-check
 dev:    cli-dev
 test:   cli-test
 lint:   cli-lint
