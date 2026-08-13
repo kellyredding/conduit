@@ -85,6 +85,12 @@ module ConduitVPN
       argv.any? { |argument| argument == "--help" || argument == "-h" }
     end
 
+    # Help for a command that is Conduit's own, with no client half to append.
+    def print_help(text : String) : Int32
+      STDOUT.puts text
+      OK
+    end
+
     # Help for a command Conduit extends, showing both halves.
     #
     # `--help` on these was forwarded to the client, which documents its own

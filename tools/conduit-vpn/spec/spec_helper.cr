@@ -50,6 +50,13 @@ module SpecHelper
       @root / "client-home"
     end
 
+    # Where settings land, given the CONDUIT_ROOT below. Its *absence* is the
+    # useful assertion: the file is only created when a value is written, so a
+    # command that should not have written one leaves nothing here.
+    def config_file : Path
+      @root / "config.json"
+    end
+
     def env : Hash(String, String?)
       {
         "CONDUIT_ROOT"        => @root.to_s,

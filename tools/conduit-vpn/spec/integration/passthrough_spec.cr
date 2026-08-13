@@ -225,4 +225,30 @@ describe "help for an extended command" do
       sandbox.calls.first.should end_with("ARGS=connect --help")
     end
   end
+
+  # config is Conduit's own, so there is no client half to append — but it used
+  # to answer a request for help with a usage error, which is the same trap in a
+  # different command.
+  it "answers config --help with help rather than a usage error" do
+    SpecHelper.sandbox do |sandbox|
+      result = SpecHelper.run(sandbox, ["config", "--help"])
+
+      result.exit_code.should eq(0)
+      result.stdout.should contain("describe")
+      result.stdout.should contain("example")
+      sandbox.calls.should be_empty
+    end
+  end
+
+  # Asking how to write a setting must not write one.
+  it "does not apply a setting when help is requested alongside it" do
+    SpecHelper.sandbox do |sandbox|
+      result = SpecHelper.run(
+        sandbox, ["config", "set", "connect-timeout", "45", "--help"]
+      )
+
+      result.exit_code.should eq(0)
+      File.exists?(sandbox.config_file.to_s).should be_false
+    end
+  end
 end
