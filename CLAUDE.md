@@ -25,23 +25,47 @@ denylist kept deliberately outside the repository, since a committed list of
 forbidden strings would be the disclosure it prevents. Point at it with
 `CONDUIT_DENYLIST`, or leave it at `~/.conduit/denylist.txt`.
 
+**The audit scans git-*tracked* files only.** A new file is invisible to it
+until staged, so writing one, running `make audit`, and reading "clean" proves
+nothing at all. Stage first, then audit.
+
 A leak that reaches a commit is not fixable by a follow-up commit — git keeps
 the object. Run the audit before committing, not after.
+
+On a fresh clone the denylist is absent and the audit refuses rather than
+covering less than it claims. `SETUP.md` documents
+`CONDUIT_ALLOW_NO_DENYLIST=1` for that case.
 
 ## Building
 
 ```bash
-make check     # audit + lint + test + build
-make dev       # fast unoptimized binary at tools/conduit-vpn/build/
-make install   # release binary + ~/.local/bin symlink
+make check       # CLI gate:  audit + lint + test + build
+make app-check   # app gate:  build + sandboxed smoke checks
+make dev         # fast unoptimized CLI binary at tools/conduit-vpn/build/
+make build       # CLI + app
 ```
+
+**`make check` does not cover the app.** It is the audit plus the CLI's gate,
+and `make app-check` is separate — so a change touching both sides needs both
+commands. Running only the first on a Swift change reports success having
+compiled none of it.
 
 Crystal resolves through mise shims, so `crystal` and `shards` are called
 directly. The version is pinned in `.tool-versions`.
 
-Once the app exists: `ConduitApp/project.yml` is the source of truth for the
-Xcode project, which `xcodegen` regenerates on every build. Never run
+`ConduitApp/project.yml` is the source of truth for the Xcode project, which
+`xcodegen` regenerates on every build and which is not tracked. Never run
 `xcodebuild` directly and never hand-edit the `.xcodeproj`.
+
+**`ConduitApp/Models/` must stay Foundation-only.** The sandboxed `VPNSmoke`
+check target compiles exactly that directory and nothing else, which is what
+lets the model layer be exercised without a window server, a subprocess, or a
+tunnel. Anything importing AppKit or SwiftUI belongs in `Services/` or
+`Views/`; putting a parser there instead costs it every check in the suite.
+
+`** BUILD SUCCEEDED **` proves nothing about whether the coding keys still match
+what the client emits — that failure surfaces at runtime as an empty menu, which
+is why the smoke target exists.
 
 ## Mirror contract
 
