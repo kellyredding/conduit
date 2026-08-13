@@ -74,6 +74,9 @@ the two makes callers retry something already in progress.
 Every command the vendor CLI provides is forwarded unchanged, so `conduit-vpn`
 is a drop-in replacement rather than a subset.
 
+See [`tools/conduit-vpn/README.md`](tools/conduit-vpn/README.md) for the full
+command surface, the exit codes, and what `--wait` actually does.
+
 ## How it works
 
 Three deliberate choices, and the first is the unusual one:
