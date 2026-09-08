@@ -102,7 +102,25 @@ describe "doctor" do
 
       result = SpecHelper.run(sandbox, ["doctor"])
 
-      result.stdout.lines.size.should eq(5)
+      result.stdout.lines.size.should eq(6)
+    end
+  end
+
+  # Says why the last session ended, when the client ended it for a reason —
+  # the line that distinguishes "this machine is misconfigured" from "the
+  # client stopped a working tunnel on purpose".
+  #
+  # Reported even when there is nothing to report, like every other check
+  # here: one that appears only on failure is one nobody knows exists until
+  # the day it does.
+  it "reports the last teardown, and says so when there was none" do
+    SpecHelper.sandbox do |sandbox|
+      sandbox.respond("list-profiles", "[]")
+
+      result = SpecHelper.run(sandbox, ["doctor"])
+
+      result.stdout.should contain("last teardown")
+      result.stdout.should contain("none recorded")
     end
   end
 

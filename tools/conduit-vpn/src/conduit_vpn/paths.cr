@@ -35,5 +35,18 @@ module ConduitVPN
     def example_config_file : Path
       root / "config.example.json"
     end
+
+    # Where the vendor's daemon writes its own log.
+    #
+    # Outside `root` because it is not Conduit's to arrange — the client owns
+    # the location and the rotation, so this is resolved rather than derived.
+    # Readable without privileges: measured, the files are
+    # `-rw-r--r-- root:wheel` inside a world-readable directory.
+    #
+    # Nothing is ever written here. The client log directory Conduit prunes
+    # sits under the home Conduit hands the client, which is a different place.
+    def daemon_log_dir : Path
+      Path.new(ENV.fetch("CONDUIT_DAEMON_LOG_DIR", "/var/log/awsvpnclient"))
+    end
   end
 end

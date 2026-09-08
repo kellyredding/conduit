@@ -45,4 +45,24 @@ enum ConduitPaths {
     static var exampleConfigFile: URL {
         root.appendingPathComponent("config.example.json")
     }
+
+    /// Where the vendor's daemon writes its own log.
+    ///
+    /// Outside `root` because it is not Conduit's to arrange — the client owns
+    /// the location and the rotation. Readable without privileges: measured,
+    /// the files are `-rw-r--r-- root:wheel` inside a world-readable
+    /// directory, which is what makes this reachable from an application that
+    /// runs as the user. It is reachable at all only because the app is
+    /// deliberately unsandboxed; see project.yml.
+    ///
+    /// Nothing is ever written here. ClientLogs prunes the *client's* log
+    /// directory under a home Conduit hands it, which is a different place.
+    static var daemonLogDir: URL {
+        if let override = environment["CONDUIT_DAEMON_LOG_DIR"],
+            !override.isEmpty
+        {
+            return expand(override)
+        }
+        return URL(fileURLWithPath: "/var/log/awsvpnclient")
+    }
 }

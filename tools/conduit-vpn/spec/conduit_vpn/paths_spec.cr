@@ -28,6 +28,25 @@ describe ConduitVPN::Paths do
     end
   end
 
+  describe ".daemon_log_dir" do
+    it "resolves to the client's own location rather than under the root" do
+      SpecHelper.with_env({
+        "CONDUIT_ROOT"           => "/somewhere/else",
+        "CONDUIT_DAEMON_LOG_DIR" => nil,
+      }) do
+        ConduitVPN::Paths.daemon_log_dir
+          .should eq(Path.new("/var/log/awsvpnclient"))
+      end
+    end
+
+    it "honors CONDUIT_DAEMON_LOG_DIR" do
+      SpecHelper.with_env({"CONDUIT_DAEMON_LOG_DIR" => "/tmp/daemon-logs"}) do
+        ConduitVPN::Paths.daemon_log_dir
+          .should eq(Path.new("/tmp/daemon-logs"))
+      end
+    end
+  end
+
   describe ".config_file" do
     it "honors CONDUIT_CONFIG independently of the root" do
       SpecHelper.with_env({

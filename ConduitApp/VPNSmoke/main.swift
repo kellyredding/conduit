@@ -20,7 +20,7 @@ for name in [
     "CONDUIT_CLIENT_PATH", "CONDUIT_CLIENT_HOME", "CONDUIT_SENSITIVE_PATTERN",
     "CONDUIT_POLL_ACTIVE", "CONDUIT_POLL_IDLE", "CONDUIT_CONNECT_TIMEOUT",
     "CONDUIT_IDENTITY_HINT_AFTER", "CONDUIT_CONNECT_GRACE_POLLS",
-    "CONDUIT_RESTORE_ON_WAKE",
+    "CONDUIT_RESTORE_ON_WAKE", "CONDUIT_DAEMON_LOG_DIR",
 ] {
     unsetenv(name)
 }
@@ -1421,6 +1421,154 @@ check(
 check(
     "and it is a distinct kind rather than an ordinary connect",
     baseline.entries.first?.kind == .alreadyConnected
+)
+
+// MARK: - Why the client last ended a session
+//
+// The one place the model layer reports a cause instead of an observation. It
+// is allowed to because the daemon writes the cause down in words, so reading
+// it is measurement — but that only holds if the reading is exact, and the two
+// negative checks below are the ones that matter most. A parser that announced
+// a failure on every healthy connect would be worse than having none.
+//
+// Fixture profile names are invented and no fixture carries an address. The
+// parser locates fields without interpreting them, so an empty bracket
+// exercises the same path a real subnet would.
+
+func readTeardown(_ log: String) -> DaemonTeardown? {
+    DaemonTeardownParser.latest(fromDaemonLog: log)
+}
+
+let localNetLog = """
+    2026-01-02T03:04:05.100000Z  INFO tokio-rt-worker ThreadId(13) LocalNet: new subnets detected new_cidrs=[]
+    2026-01-02T03:04:05.200000Z  INFO tokio-rt-worker ThreadId(13) LocalNet: new LAN detected, stopping session
+    2026-01-02T03:04:06.000000Z  INFO ThreadId(99) connection: ConnectionStatus state transition old_state=Reconnecting new_state=WaitingForIdentity connection_id=1 profile=Alpha
+    """
+
+check(
+    "a local network change is read as the cause",
+    readTeardown(localNetLog)?.cause == .localNetworkChanged
+)
+// The line that names this cause comes from the network watcher and carries no
+// profile of its own, so the name has to come from a neighbour.
+check(
+    "and the profile comes from the line below it, having none of its own",
+    readTeardown(localNetLog)?.profile == "Alpha"
+)
+// Reported as the consequence rather than the cause. A reader told only that a
+// sign-in is needed fixes the wrong thing, repeatedly, because it comes back.
+check(
+    "and the sign-in it caused is reported as still needed",
+    readTeardown(localNetLog)?.needsSignIn == true
+)
+check(
+    "and the time is the initiating event's, not the sign-in's",
+    readTeardown(localNetLog).map {
+        ISO8601DateFormatter().string(from: $0.at).hasPrefix("2026-01-02T03:04:05")
+    } == true
+)
+
+// The subtlety the parser turns on. A federated sign-in *begins* with an
+// AUTH_FAILED and a challenge — observed on a connect that went on to work
+// perfectly two seconds later. What separates that from a real failure is the
+// state the transition came from, not the words in it.
+let normalSignIn = """
+    2026-01-02T03:04:05.000000Z  INFO ThreadId(99) connection: OpenVPN callback Log(OvpnLog { text: "AUTH_FAILED\\n" }) profile=Alpha
+    2026-01-02T03:04:05.100000Z  INFO ThreadId(99) connection: OpenVPN callback Event(OvpnEvent { error: true, fatal: true, name: "DYNAMIC_CHALLENGE", info: "CRV1:R:opaque" }) profile=Alpha
+    2026-01-02T03:04:05.200000Z  INFO ThreadId(99) connection: ConnectionStatus state transition old_state=Connecting new_state=WaitingForIdentity connection_id=1 profile=Alpha
+    2026-01-02T03:04:12.000000Z  INFO ThreadId(99) connection: ConnectionStatus state transition old_state=Connecting new_state=Connected connection_id=1 profile=Alpha
+    """
+check(
+    "a sign-in that is merely starting is not a teardown",
+    readTeardown(normalSignIn) == nil
+)
+
+// The other trap, and the one that already cost a wrong hypothesis. This
+// arrives in the server's pushed options on every successful connect, so
+// matching the words reports a keepalive timeout on every good tunnel.
+let pushedOptions = """
+    2026-01-02T03:04:05.000000Z  INFO ThreadId(99) connection: OpenVPN callback Log(OvpnLog { text: "OPTIONS:\\n0 [ping-restart] [120]\\n1 [comp-lzo] [no]\\n" }) profile=Alpha
+    """
+check(
+    "a pushed ping-restart option is not a teardown",
+    readTeardown(pushedOptions) == nil
+)
+
+check(
+    "a reconnect that meets a challenge is a teardown",
+    readTeardown("""
+        2026-01-02T03:04:06.000000Z  INFO ThreadId(99) connection: ConnectionStatus state transition old_state=Reconnecting new_state=WaitingForIdentity connection_id=1 profile=Bravo
+        """)?.cause == .signInRequired
+)
+check(
+    "a rejected server address is its own cause",
+    readTeardown("""
+        2026-01-02T03:04:06.000000Z  INFO ThreadId(99) connection: ServerIpValidationFailed profile=Bravo
+        """)?.cause == .serverAddressRejected
+)
+check("an empty log yields nothing", readTeardown("") == nil)
+check(
+    "and text carrying no marker yields nothing",
+    readTeardown("2026-01-02T03:04:05.000000Z  INFO nothing happened here") == nil
+)
+
+// Two sessions hours apart. The newest is the one worth reporting, and the
+// older one must not be dragged in as its cause — which is why the look-back
+// for an initiating event is bounded by time.
+let twoSessions = """
+    2026-01-02T01:00:00.000000Z  INFO tokio-rt-worker ThreadId(13) LocalNet: new LAN detected, stopping session
+    2026-01-02T05:00:00.000000Z  INFO ThreadId(99) connection: ConnectionStatus state transition old_state=Reconnecting new_state=WaitingForIdentity connection_id=1 profile=Bravo
+    """
+check(
+    "an older unrelated teardown is not adopted as the cause of a newer one",
+    readTeardown(twoSessions)?.cause == .signInRequired
+)
+
+// The file half. The sandbox denies subprocesses but not files, so the whole
+// path is reachable here rather than only its middle.
+let daemonLogs = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("conduit-smoke-daemon-logs")
+try? FileManager.default.removeItem(at: daemonLogs)
+try? FileManager.default.createDirectory(
+    at: daemonLogs, withIntermediateDirectories: true
+)
+try? data(localNetLog).write(
+    to: daemonLogs.appendingPathComponent("aws_vpn_client_daemon_20260830.log")
+)
+try? data(twoSessions).write(
+    to: daemonLogs.appendingPathComponent("aws_vpn_client_daemon_20260830.log.1")
+)
+
+// The number inside the name looks like a date and is not one — it did not move
+// across eight days of observed rotation. So the live file is told from its
+// history by the extension, and never by building a name from today.
+check(
+    "the live log is chosen over a rotation",
+    DaemonLog.newest(in: daemonLogs)?.lastPathComponent
+        == "aws_vpn_client_daemon_20260830.log"
+)
+check(
+    "and reading the directory yields the teardown recorded in it",
+    DaemonLog.latestTeardown(in: daemonLogs)?.cause == .localNetworkChanged
+)
+check(
+    "an absent directory yields nothing rather than failing",
+    DaemonLog.latestTeardown(
+        in: daemonLogs.appendingPathComponent("missing")
+    ) == nil
+)
+
+let tailFixture = daemonLogs.appendingPathComponent("tail-fixture.txt")
+try? data("first line\nsecond line\nthird line\n").write(to: tailFixture)
+// An offset chosen in bytes lands mid-line, and a partial line is not worth
+// parsing.
+check(
+    "a tail starting mid-file drops the partial line it landed in",
+    DaemonLog.tail(of: tailFixture, bytes: 16)?.hasPrefix("third line") == true
+)
+check(
+    "a tail covering the whole file keeps its first line",
+    DaemonLog.tail(of: tailFixture, bytes: 4096)?.hasPrefix("first line") == true
 )
 
 // MARK: - Result

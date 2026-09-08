@@ -24,6 +24,17 @@ struct TunnelFacts: Equatable, Sendable {
     var routes: [TunnelRoute] = []
     var resolvers: [DNSResolver] = []
 
+    /// Why the client last ended a session, if it said.
+    ///
+    /// Here rather than in the activity log, and the distinction is worth
+    /// keeping straight. The log watches the connection listing, where the
+    /// difference between a deliberate teardown and a collapse does not
+    /// survive a poll, so it records what it saw and draws no conclusions.
+    /// This is read from the daemon's own words on the same event as the
+    /// routes beside it — a measured fact about the system, which is what this
+    /// type is for.
+    var teardown: DaemonTeardown?
+
     /// When these were read, so the window can say how current they are rather
     /// than implying they are live. They refresh on events, not on a timer.
     var readAt: Date?

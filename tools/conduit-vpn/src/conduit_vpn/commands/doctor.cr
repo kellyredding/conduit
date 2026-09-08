@@ -45,6 +45,7 @@ module ConduitVPN
         preconditions = [check_binary(client, binary), check_home(client, home)]
         checks.concat(preconditions)
         checks << check_address_synthesis
+        checks << check_last_teardown
 
         if preconditions.all?(&.level.pass?)
           responds = check_responds(client)
@@ -75,6 +76,42 @@ module ConduitVPN
         else
           Check.new(Level::Pass, "addressing", Network.summary)
         end
+      end
+
+      # A teardown older than this is history rather than a diagnosis. Naming
+      # it every run would train a reader to skip the line, which costs the
+      # day it actually matters.
+      TEARDOWN_RECENT = 1.hour
+
+      # Why the last session ended, when the client ended it for a reason.
+      #
+      # This is the only check that reports something the client did rather
+      # than something about this machine's setup, and it earns the place: a
+      # tunnel that dies seconds after connecting looks like a broken setup,
+      # and this is the line that says it is not one.
+      #
+      # No profile name, per the note at the top of this file.
+      private def check_last_teardown : Check
+        reading = DaemonTeardown.latest
+
+        unless reading
+          return Check.new(Level::Pass, "last teardown", "none recorded")
+        end
+
+        age = Time.utc - reading.at
+        if age > TEARDOWN_RECENT
+          return Check.new(Level::Pass, "last teardown", "none in the last hour")
+        end
+
+        detail = "#{reading.cause.summary}, #{humanize(age)} ago"
+        detail += " — a new sign-in is needed" if reading.needs_sign_in
+        Check.new(Level::Warn, "last teardown", detail)
+      end
+
+      private def humanize(span : Time::Span) : String
+        minutes = span.total_minutes.round.to_i
+        return "less than a minute" if minutes < 1
+        minutes == 1 ? "1 minute" : "#{minutes} minutes"
       end
 
       private def check_binary(client : Client, binary : Path) : Check

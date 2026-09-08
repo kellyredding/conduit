@@ -38,8 +38,23 @@ actor SystemProbe {
         return TunnelFacts(
             routes: await routes,
             resolvers: await attachReach(to: await resolvers),
+            teardown: teardown(),
             readAt: now
         )
+    }
+
+    /// The daemon's own account of why it last ended a session.
+    ///
+    /// A file read rather than a subprocess, so it belongs here on cost as well
+    /// as on subject: it is another read-only look at state Conduit does not
+    /// own, wanted on exactly the same event as the routes, and cheaper than
+    /// either command beside it.
+    ///
+    /// Failure is silent and total, like the two commands above — an absent or
+    /// unreadable log leaves the window with nothing to say about causes, which
+    /// is the honest answer rather than an error worth showing.
+    private func teardown() -> DaemonTeardown? {
+        DaemonLog.latestTeardown(in: ConduitPaths.daemonLogDir)
     }
 
     /// Fills in which interface reaches each nameserver.

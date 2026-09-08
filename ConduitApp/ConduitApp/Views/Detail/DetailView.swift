@@ -24,6 +24,7 @@ struct DetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 connections
+                teardown
                 tunnels
                 resolvers
                 activity
@@ -60,6 +61,91 @@ struct DetailView: View {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Last teardown
+
+    /// Directly under the connections it explains. Somebody opens this window
+    /// because a tunnel vanished, reads the top of it first, and the reason
+    /// belongs where the absence is.
+    ///
+    /// Absent altogether when the client recorded nothing, rather than an empty
+    /// card: a heading with "nothing to report" beneath it only invites the
+    /// reader to wonder what it would otherwise have said.
+    ///
+    /// This is the one place the window states a cause. It can, because the
+    /// daemon wrote the cause down — everything else here is either a
+    /// measurement or an observation, and the activity list below deliberately
+    /// draws no conclusions at all.
+    @ViewBuilder private var teardown: some View {
+        if let teardown = store.facts.teardown {
+            SettingsCard(title: "Last teardown") {
+                Text(Self.describe(teardown))
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(Self.remedy(for: teardown.cause))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    /// Leads with the cause and mentions the sign-in second, which is the order
+    /// they need acting on: the sign-in demand is downstream of whatever ended
+    /// the session, and a reader told only about the sign-in fixes the wrong
+    /// thing — repeatedly, since it comes back.
+    private static func describe(_ teardown: DaemonTeardown) -> String {
+        let when = clock.string(from: teardown.at)
+        let who = teardown.profile ?? "A profile"
+
+        var text: String
+        switch teardown.cause {
+        case .localNetworkChanged:
+            text = """
+                The client stopped \(who) at \(when) because a new local \
+                network appeared.
+                """
+        case .signInRequired:
+            text = """
+                \(who) tried to reconnect at \(when) and was asked to sign in \
+                again.
+                """
+        case .serverAddressRejected:
+            text = """
+                The client stopped \(who) at \(when): it rejected the address \
+                the tunnel came up on.
+                """
+        }
+
+        if teardown.needsSignIn, teardown.cause != .signInRequired {
+            text += " The reconnect that followed needs a new sign-in."
+        }
+        return text
+    }
+
+    private static func remedy(for cause: DaemonTeardown.Cause) -> String {
+        switch cause {
+        case .localNetworkChanged:
+            return """
+                The client records which local subnets exist when a tunnel \
+                comes up and stops the session if a new one appears. A \
+                container network that comes and goes will do this every time \
+                it arrives; bringing those up before connecting avoids it.
+                """
+        case .signInRequired:
+            return """
+                An automatic reconnect cannot answer an identity challenge. \
+                Connecting again opens a browser, which can.
+                """
+        case .serverAddressRejected:
+            return """
+                A network that synthesizes addresses provokes this. \
+                conduit-vpn doctor reports whether this one does.
+                """
         }
     }
 

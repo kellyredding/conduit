@@ -63,6 +63,11 @@ module SpecHelper
         "CONDUIT_CLIENT_PATH" => FAKE_CLIENT,
         "FAKE_VPN_RESPONSES"  => @responses.to_s,
         "FAKE_VPN_CALL_LOG"   => @call_log.to_s,
+        # Deliberately inside the sandbox and deliberately empty. Left
+        # unset, `doctor` reads the real daemon log and its output then
+        # depends on whether this machine happened to drop a tunnel in the
+        # last hour — which is not an assertion about the code.
+        "CONDUIT_DAEMON_LOG_DIR" => (@root / "daemon-logs").to_s,
         # Crystal merges `env` into the parent's environment, so the guard
         # set above would otherwise reach the binary under test and make it
         # exit before doing anything. A nil value unsets the variable.
