@@ -172,6 +172,22 @@ final class VPNStore: ObservableObject {
     /// that, so without this a settling network starts several at once.
     private var restoreInFlight = false
 
+    /// When the arming happened, so one that never fires can give up.
+    ///
+    /// The poll's clearing cannot reach it. That requires a completed attempt
+    /// — correctly, because a reading taken before one describes the pre-sleep
+    /// network — so a wake whose network never changed leaves `restorePending`
+    /// true with `restoreAttempts` at zero, indefinitely. The path events that
+    /// eventually arrive are then the ones a person's own connect generates,
+    /// and the restore fires against a tunnel they just asked for.
+    private var restoreArmedAt: Date?
+
+    /// Long enough for a wake whose network takes its time, short enough that
+    /// a stale arming is gone before it can attach itself to something done an
+    /// hour later. Borrows the scale of `connect-timeout` rather than adding a
+    /// setting nobody would ever tune.
+    private let restoreArmWindow: TimeInterval = 120
+
     /// Profiles Conduit is itself acting on. This is the only in-flight signal
     /// worth having: it is a fact the store owns rather than an inference about
     /// whether somebody else's transition is still alive.
@@ -545,6 +561,12 @@ final class VPNStore: ObservableObject {
             return
         }
 
+        // A deliberate action supersedes what was remembered before sleep. Left
+        // armed, a restore reaching this profile later would tear down the
+        // tunnel being asked for here — and `releaseOthers` would take it down
+        // even when the remembered profile was a different one.
+        disarmRestore("superseded by a connect")
+
         notes[name] = nil
         activeAttempts.insert(name)
         attemptsInProgress.insert(name)
@@ -606,6 +628,10 @@ final class VPNStore: ObservableObject {
 
     func disconnect(profile name: String) {
         guard attemptTasks[name] == nil else { return }
+
+        // Asking for a profile to be down is the clearest statement there is
+        // that a restore of it is no longer wanted.
+        disarmRestore("superseded by a disconnect")
 
         notes[name] = nil
         activeAttempts.insert(name)
@@ -736,6 +762,7 @@ final class VPNStore: ObservableObject {
                     self.connectedBeforeSleep = []
                     self.restoreWanted = remembered
                     self.restoreAttempts = 0
+                    self.restoreArmedAt = Date()
 
                     // Arm the restore. It deliberately does not run here —
                     // firing at wake is precisely the client's mistake.
@@ -783,48 +810,78 @@ final class VPNStore: ObservableObject {
     private func restoreIfArmed() {
         guard restorePending, !restoreInFlight else { return }
 
-        // Never interrupt an attempt that is still going. Establishing a tunnel
-        // generates path events, so without this the event raised by attempt
-        // one arriving would start attempt two, whose disconnect would tear
-        // down the tunnel attempt one was most of the way through building —
-        // a retry that destroys its own work, repeating until the cap.
-        //
-        // Asking whether it is still *moving* rather than merely transitional
-        // is what makes the retry reachable at all. An abandoned attempt is
-        // transitional for ten minutes, so testing that would decline every
-        // retry for the whole timeout — the retry would exist and never run.
+        // Never interrupt an attempt that is still going, never trust a reading
+        // taken before the first one, and give up an arming whose wake never
+        // produced a usable network. The rules, their order, and what each one
+        // cost to learn live with the decision in RestoreDecision — where a
+        // check can reach them. What is left here is carrying it out.
         let configured = ConduitConfig.seconds("connect-timeout")
-        let window = configured > 0 ? configured : 120
-        if restoreWanted.contains(where: { name in
-            profiles.first { $0.name == name }?.isSettling(within: window) ?? false
-        }) {
+        let decision = RestoreDecision.evaluate(
+            attempts: restoreAttempts,
+            maxAttempts: restoreMaxAttempts,
+            armedAt: restoreArmedAt,
+            armWindow: restoreArmWindow,
+            wanted: restoreWanted,
+            profiles: profiles,
+            settleWindow: configured > 0 ? configured : 120
+        )
+        restoreWanted = decision.wanted
+
+        switch decision.action {
+        case .hold(let reason):
             // Debug rather than notice: this fires once per path event during
             // an attempt — four times in a normal wake — and says only that a
             // guard did its job. It stays because it is the evidence if the
             // retry ever misbehaves, but it does not belong in the persisted
             // record of what happened.
-            Self.log.debug("attempt still settling: not interrupting")
-            return
-        }
-        guard restoreAttempts < restoreMaxAttempts else {
+            Self.log.debug("restore held: \(reason.rawValue, privacy: .public)")
+
+        case .disarm(.exhausted):
             Self.log.error(
                 "restore gave up after \(self.restoreAttempts, privacy: .public) attempts"
             )
-            for name in restoreWanted.sorted() {
+            // Read before standing down, which clears the set.
+            for name in decision.wanted.sorted() {
                 Notifier.post(
                     title: "\(name) did not come back",
                     body: "It was connected before your Mac slept."
                 )
             }
-            restorePending = false
-            return
+            standDownRestore()
+
+        case .disarm(let reason):
+            Self.log.notice(
+                "restore disarmed: \(reason.rawValue, privacy: .public)"
+            )
+            standDownRestore()
+
+        case .act:
+            restoreAttempts += 1
+            restoreInFlight = true
+            Self.log.notice(
+                "path satisfied: attempt \(self.restoreAttempts, privacy: .public)"
+            )
+            Task { await restore() }
         }
-        restoreAttempts += 1
-        restoreInFlight = true
-        Self.log.notice(
-            "path satisfied: attempt \(self.restoreAttempts, privacy: .public)"
-        )
-        Task { await restore() }
+    }
+
+    /// Forgets the arming. Silent, because every caller has better wording for
+    /// why than this could invent.
+    private func standDownRestore() {
+        restorePending = false
+        restoreArmedAt = nil
+        restoreWanted.removeAll()
+    }
+
+    /// Gives up the arming because a person acted, which supersedes whatever
+    /// was remembered before sleep.
+    ///
+    /// Guarded on being armed so the ordinary case — connecting something with
+    /// no restore outstanding, which is nearly every connect — writes nothing.
+    private func disarmRestore(_ why: String) {
+        guard restorePending else { return }
+        standDownRestore()
+        Self.log.notice("restore disarmed: \(why, privacy: .public)")
     }
 
     /// One pass over everything still wanted. Called again by the next

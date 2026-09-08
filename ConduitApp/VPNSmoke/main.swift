@@ -402,6 +402,125 @@ check(
     "an unreadable timestamp reads as settling rather than as nothing happening",
     state("Alpha", .connecting).isSettling(within: window)
 )
+
+// MARK: - The restore decision
+//
+// Every defect this has had was in the ordering of its rules, and none were
+// reachable from a check while the decision sat inside a service wired to a
+// workspace notification, a path monitor and a subprocess. These stand the
+// rules up on their own.
+
+func decide(
+    attempts: Int,
+    armedSecondsAgo: TimeInterval? = 0,
+    wanted: Set<String>,
+    profiles: [ProfileState]
+) -> RestoreDecision {
+    RestoreDecision.evaluate(
+        attempts: attempts,
+        maxAttempts: 4,
+        armedAt: armedSecondsAgo.map { Date().addingTimeInterval(-$0) },
+        armWindow: 120,
+        wanted: wanted,
+        profiles: profiles,
+        settleWindow: window
+    )
+}
+
+// The window this was written for. `isSettling` is false for a profile that has
+// arrived, so between arrival and the next poll the arming was live and
+// unguarded — and arriving is itself what raises the path event that lands
+// there. A second attempt then disconnected the tunnel the first one built.
+check(
+    "an arrived profile disarms the restore instead of earning another attempt",
+    decide(
+        attempts: 1,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .connected, movedSecondsAgo: 1)]
+    ) == RestoreDecision(action: .disarm(.confirmed), wanted: [])
+)
+// The counterpart, and the regression that must not come back with it: before
+// any attempt has run, a Connected reading describes the network the machine
+// had before it slept. Consulted 52 ms after arming, it confirmed a restore
+// that had not happened and stood the whole thing down.
+check(
+    "an arrived profile is not trusted before the first attempt",
+    decide(
+        attempts: 0,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .connected, movedSecondsAgo: 1)]
+    ).action == .act
+)
+check(
+    "a moving attempt is held rather than interrupted",
+    decide(
+        attempts: 1,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .connecting, movedSecondsAgo: 3)]
+    ).action == .hold(.settling)
+)
+// The retry has to stay reachable: an abandoned attempt is transitional for ten
+// minutes, and testing that instead of whether it is still moving would decline
+// every retry for the whole timeout.
+check(
+    "an abandoned attempt does not hold the restore for the whole timeout",
+    decide(
+        attempts: 1,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .waitingForIdentity, movedSecondsAgo: 598)]
+    ).action == .act
+)
+// An arming whose wake never produced a satisfied path event otherwise stays
+// armed forever: the poll's clearing requires a completed attempt and there has
+// not been one. The events that finally arrive are a person's own connect.
+check(
+    "an arming that never fired expires instead of waiting for a later event",
+    decide(
+        attempts: 0,
+        armedSecondsAgo: 121,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .notConnected)]
+    ).action == .disarm(.expired)
+)
+check(
+    "an arming still inside the window acts",
+    decide(
+        attempts: 0,
+        armedSecondsAgo: 119,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .notConnected)]
+    ).action == .act
+)
+// Expiry outranks settling on purpose. A stale arming sitting beside a connect
+// the person is making themselves has to be given up, not held for the event
+// after — holding it is how it reaches their tunnel.
+check(
+    "a stale arming expires even while something is moving",
+    decide(
+        attempts: 0,
+        armedSecondsAgo: 300,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .connecting, movedSecondsAgo: 2)]
+    ).action == .disarm(.expired)
+)
+check(
+    "the attempt cap is still the last word",
+    decide(
+        attempts: 4,
+        wanted: ["Alpha"],
+        profiles: [state("Alpha", .notConnected)]
+    ).action == .disarm(.exhausted)
+)
+// Confirming one does not abandon the other.
+check(
+    "one of two confirmed leaves the other wanted",
+    decide(
+        attempts: 1,
+        wanted: ["Alpha", "Bravo"],
+        profiles: [state("Alpha", .connected), state("Bravo", .notConnected)]
+    ) == RestoreDecision(action: .act, wanted: ["Bravo"])
+)
+
 check(
     "an unreachable client outranks everything",
     MenuIcon.state(
