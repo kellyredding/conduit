@@ -27,13 +27,36 @@
 #
 # Scans git-tracked files only, so build output and scratch files are out of
 # scope. Exit 1 on any match.
+#
+#   scripts/check-disclosure.sh --file PATH...
+#
+# scans those files instead, tracked or not: bin/release checks the release
+# description it generates this way, since that text is published too.
 
 set -euo pipefail
+
+files=()
+if [ "${1:-}" = "--file" ]; then
+  shift
+  [ "$#" -gt 0 ] || { echo "check-disclosure.sh: --file needs at least one path" >&2; exit 2; }
+  for path in "$@"; do
+    [ -f "$path" ] || { echo "check-disclosure.sh: no such file: $path" >&2; exit 2; }
+    files+=("$(cd "$(dirname "$path")" && pwd)/$(basename "$path")")
+  done
+fi
 
 cd "$(git rev-parse --show-toplevel)"
 
 SELF="scripts/check-disclosure.sh"
 found=0
+
+cn_scanned_files() {
+  if [ "${#files[@]}" -gt 0 ]; then
+    printf '%s\0' "${files[@]}"
+  else
+    git ls-files -z
+  fi
+}
 
 # Report matches for one rule. Non-fatal individually so a single run
 # surfaces every problem rather than only the first.
@@ -42,7 +65,7 @@ scan() {
   shift 2
 
   local hits
-  hits=$(git ls-files -z \
+  hits=$(cn_scanned_files \
     | xargs -0 rg --no-messages --with-filename --line-number \
         --ignore-case --regexp "$pattern" -- 2>/dev/null \
     | rg -v "^$SELF:" || true)
@@ -59,7 +82,11 @@ scan() {
   printf '%s\n' "$hits" | sed 's/^/    /'
 }
 
-echo "disclosure audit"
+if [ "${#files[@]}" -gt 0 ]; then
+  echo "disclosure audit: ${files[*]}"
+else
+  echo "disclosure audit"
+fi
 
 # A dotted quad is almost never legitimate in source here. Loopback, the
 # unspecified address, and the broadcast address are the exceptions.
@@ -98,7 +125,7 @@ if [ -n "$DENYLIST" ] && [ -f "$DENYLIST" ]; then
   rg -v '^[[:space:]]*(#|$)' "$DENYLIST" > "$compiled" || true
 
   if [ -s "$compiled" ]; then
-    hits=$(git ls-files -z \
+    hits=$(cn_scanned_files \
       | xargs -0 rg --no-messages --with-filename --line-number \
           --ignore-case --file "$compiled" -- 2>/dev/null \
       | rg -v "^$SELF:" || true)

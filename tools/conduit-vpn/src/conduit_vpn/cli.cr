@@ -38,6 +38,7 @@ module ConduitVPN
       "status"  => "Show every profile and its connection state  [--json]",
       "config"  => "Read and write settings   [get|set|unset|describe|example]",
       "doctor"  => "Check that this machine is set up correctly",
+      "update"  => "Install the latest release  [--version X.Y.Z | --local [PATH]]",
       "version" => "Print the conduit-vpn version",
     }
 
@@ -64,6 +65,8 @@ module ConduitVPN
         return Commands::Settings.run(argv[1..])
       when "doctor"
         return Commands::Doctor.run(argv[1..])
+      when "update"
+        return Commands::Update.run(argv[1..])
       when "connect"
         return Commands::Connect.run(argv)
       when "disconnect"
@@ -127,6 +130,22 @@ module ConduitVPN
       STDERR.puts "conduit-vpn: could not read the client's response " \
                   "(#{error.message})"
       FAILURE
+    end
+
+    # A child's exit code, or 128 plus the signal that ended it, as a shell
+    # reports it. `exit_code` raises for a signal death.
+    def exit_code_for(status : Process::Status) : Int32
+      status.exit_code? || status.exit_signal?.try { |signal| 128 + signal.value } || FAILURE
+    end
+
+    def describe_exit(status : Process::Status) : String
+      if code = status.exit_code?
+        "exit #{code}"
+      elsif signal = status.exit_signal?
+        "signal #{signal}"
+      else
+        status.to_s
+      end
     end
 
     private def forward(argv : Array(String)) : Int32

@@ -5,7 +5,7 @@ require "./conduit_vpn/error"
 require "./conduit_vpn/**"
 
 module ConduitVPN
-  VERSION = {{ read_file("#{__DIR__}/../VERSION.txt").strip }}
+  VERSION = {{ read_file("#{__DIR__}/../../../VERSION").strip }}
 end
 
 # Specs require this file to reach the library without also running the

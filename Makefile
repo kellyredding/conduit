@@ -1,5 +1,6 @@
-.PHONY: all audit check build dev test lint format install clean \
-        cli-build cli-dev cli-test cli-lint cli-format cli-install cli-clean
+.PHONY: all audit check build dev test lint format clean \
+        cli-build cli-check cli-dev cli-test cli-lint cli-format cli-install cli-clean \
+        app-build app-smoke app-check app-release app-clean
 
 all: cli-build
 
@@ -19,6 +20,8 @@ cli-dev:     ; $(MAKE) -C tools/conduit-vpn dev
 cli-test:    ; $(MAKE) -C tools/conduit-vpn test
 cli-lint:    ; $(MAKE) -C tools/conduit-vpn lint
 cli-format:  ; $(MAKE) -C tools/conduit-vpn format
+# The CLI alone, unsigned, for iterating on it. The app is installed only by
+# install.sh (`conduit-vpn update --local` for a checkout).
 cli-install: ; $(MAKE) -C tools/conduit-vpn install
 cli-clean:   ; $(MAKE) -C tools/conduit-vpn clean
 
@@ -28,14 +31,11 @@ app-build:     ; $(MAKE) -C ConduitApp build
 app-smoke:     ; $(MAKE) -C ConduitApp smoke
 app-check:     ; $(MAKE) -C ConduitApp check
 app-release:   ; $(MAKE) -C ConduitApp release
-app-install:   ; $(MAKE) -C ConduitApp install
-app-uninstall: ; $(MAKE) -C ConduitApp uninstall
 app-clean:     ; $(MAKE) -C ConduitApp clean
 
 # --- Aggregates ---
 
 build:   cli-build app-build
-install: cli-install app-install
 clean:   cli-clean app-clean
 
 # Delegates rather than restating the CLI's own gate. Spelling the steps out

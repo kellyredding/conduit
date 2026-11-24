@@ -35,7 +35,7 @@ targets:
         PRODUCT_NAME: Conduit
         EXECUTABLE_NAME: Conduit
         PRODUCT_BUNDLE_IDENTIFIER: com.kellyredding.Conduit
-        MARKETING_VERSION: "0.1.0"
+        # MARKETING_VERSION comes from the repository's VERSION via the Makefile.
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.10"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

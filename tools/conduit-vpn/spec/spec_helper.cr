@@ -1,5 +1,6 @@
 require "spec"
 require "file_utils"
+require "digest/sha256"
 
 # Reach the library without also running the program. Integration examples
 # invoke the built binary as a subprocess instead — exit codes and stream
@@ -68,11 +69,63 @@ module SpecHelper
         # depends on whether this machine happened to drop a tunnel in the
         # last hour — which is not an assertion about the code.
         "CONDUIT_DAEMON_LOG_DIR" => (@root / "daemon-logs").to_s,
+        # The install checks read these instead of ~/Applications and the
+        # real Launch Services. The lsregister is missing unless an example
+        # writes a fake there.
+        "CONDUIT_APPLICATIONS_DIR" => applications.to_s,
+        "CONDUIT_LSREGISTER"       => lsregister.to_s,
         # Crystal merges `env` into the parent's environment, so the guard
         # set above would otherwise reach the binary under test and make it
         # exit before doing anything. A nil value unsets the variable.
         "CONDUIT_SKIP_CLI" => nil,
       } of String => String?
+    end
+
+    def applications : Path
+      @root / "Applications"
+    end
+
+    def lsregister : Path
+      @root / "lsregister"
+    end
+
+    # An installed Conduit.app as install.sh leaves one, unsigned, with the
+    # given build commit stamped into its Info.plist (none when nil).
+    def install_app(commit : String?, version : String = "0.1.0") : Path
+      app = applications / "Conduit.app"
+      Dir.mkdir_p(app / "Contents")
+      stamp = commit ? "<key>ConduitBuildCommit</key><string>#{commit}</string>" : ""
+      File.write(app / "Contents" / "Info.plist", <<-PLIST)
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict>
+        <key>CFBundleShortVersionString</key><string>#{version}</string>#{stamp}
+        </dict></plist>
+        PLIST
+      app
+    end
+
+    # The installed CLI as a plain file, returning its SHA-256.
+    def install_cli(body : String = "conduit-vpn") : String
+      path = @root / "bin" / "conduit-vpn"
+      Dir.mkdir_p(path.parent)
+      File.write(path, body)
+      Digest::SHA256.hexdigest(body)
+    end
+
+    def write_manifest(commit : String = "abc123def456", sha256 : String = "00",
+                       signer : String = "Conduit Release Signing", dirty : Bool = false) : Nil
+      File.write(@root / "installed-manifest.json", <<-JSON)
+        {
+          "version": "0.1.0",
+          "commit": "#{commit}",
+          "dirty": #{dirty},
+          "built_at": "2026-11-24T10:00:00Z",
+          "signing": "op",
+          "signer": "#{signer}",
+          "conduit_vpn_sha256": "#{sha256}"
+        }
+        JSON
     end
   end
 
@@ -113,19 +166,44 @@ module SpecHelper
   end
 
   def run(sandbox : Sandbox, args : Array(String),
-          extra_env : Hash(String, String?) = {} of String => String?) : Result
-    invoke(args, sandbox.env.merge(extra_env))
+          extra_env : Hash(String, String?) = {} of String => String?,
+          chdir : String? = nil) : Result
+    invoke(args, sandbox.env.merge(extra_env), chdir)
   end
 
-  def invoke(args : Array(String), env : Hash(String, String?)) : Result
+  def invoke(args : Array(String), env : Hash(String, String?), chdir : String? = nil) : Result
     unless File::Info.executable?(BINARY)
       raise "conduit-vpn not built at #{BINARY} — run `make dev` first"
     end
 
     stdout = IO::Memory.new
     stderr = IO::Memory.new
-    status = Process.run(BINARY, args, env: env, output: stdout, error: stderr)
-    Result.new(stdout.to_s, stderr.to_s, status.exit_code)
+    status = Process.run(BINARY, args, env: env, output: stdout, error: stderr, chdir: chdir)
+    Result.new(stdout.to_s, stderr.to_s, ConduitVPN::CLI.exit_code_for(status))
+  end
+
+  def write_executable(path : Path, body : String) : Path
+    Dir.mkdir_p(path.parent)
+    File.write(path, body)
+    File.chmod(path, 0o755)
+    path
+  end
+
+  # A git repository shaped like a Conduit checkout, whose bin/package and
+  # install.sh are the given stand-ins, so `update --local` never signs or
+  # installs anything. With `conduit: false` it lacks ConduitApp/project.yml.
+  def checkout(sandbox : Sandbox, package : String = "#!/bin/sh\n", install : String = "#!/bin/sh\n",
+               conduit : Bool = true) : Path
+    root = sandbox.root / "checkout"
+    Dir.mkdir_p(root / "tools")
+    Process.run("git", ["init", "-q", root.to_s]).success?.should be_true
+    write_executable(root / "bin" / "package", package)
+    write_executable(root / "install.sh", install)
+    if conduit
+      Dir.mkdir_p(root / "ConduitApp")
+      File.write(root / "ConduitApp" / "project.yml", "name: ConduitApp\n")
+    end
+    root
   end
 
   # Set environment variables for the duration of a block, restoring exactly

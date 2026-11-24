@@ -12,6 +12,9 @@ ConduitApp/*.xcworkspace/
 ConduitApp/DerivedData/
 *.swp
 
+# Packaging
+dist/
+
 # macOS
 .DS_Store
 

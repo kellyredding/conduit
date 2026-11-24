@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Builds the conduit-vpn CLI and a Release Conduit.app from this tree, signs
+# both with the "Conduit Release Signing" identity, and writes one archive for
+# install.sh:
+#
+#   <out>/conduit-darwin-arm64.tar.gz
+#   <out>/conduit-darwin-arm64.tar.gz.sha256
+#
+# Usage: bin/package [--local] [--sign op|adhoc] [--out DIR]
+#
+#   --local   Allow uncommitted changes (for `conduit-vpn update --local`).
+#   --sign    op (the default, always): the release identity from 1Password.
+#             adhoc, with --local only, checks that a build signs; install.sh
+#             refuses its archive.
+#   --out     Where to write the archive (default: dist/).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ASSET="conduit-darwin-arm64.tar.gz"
+APP_ID="com.kellyredding.Conduit"
+BINARY_ID="com.kellyredding.conduit-vpn"
+MIN_MACOS=26
+
+local_build=false
+sign=op
+out="$ROOT/dist"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --local) local_build=true ;;
+    --sign) sign="${2:?--sign needs op or adhoc}"; shift ;;
+    --out) out="${2:?--out needs a directory}"; shift ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "bin/package: unknown option '$1'" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+say() { printf '==> %s\n' "$*"; }
+die() { printf 'bin/package: %s\n' "$*" >&2; exit 1; }
+
+# No fallback to ad hoc when op is missing: install.sh refuses an ad-hoc
+# archive, so the fallback would only defer the failure.
+[[ "$sign" == "op" || "$sign" == "adhoc" ]] || die "--sign takes op or adhoc, not '$sign'."
+if [[ "$sign" == "adhoc" ]] && ! $local_build; then
+  die "a release must be signed with the release identity (--sign op)."
+fi
+
+# --- Preflight -------------------------------------------------------------
+
+[[ "$(uname -m)" == "arm64" ]] || die "Conduit releases are built on Apple Silicon (arm64) only."
+# The CLI requires the macOS it was built on, so this is the oldest it runs on.
+macos="$(sw_vers -productVersion)"
+(( ${macos%%.*} >= MIN_MACOS )) || die "macOS $MIN_MACOS or later is required (this Mac runs $macos)."
+
+for cmd in git xcodebuild xcodegen crystal shards tar shasum; do
+  command -v "$cmd" >/dev/null || die "'$cmd' is not installed. See SETUP.md."
+done
+if [[ "$sign" == "op" ]]; then
+  command -v op >/dev/null || die "the 1Password CLI (op) is not installed; it holds the signing identity."
+fi
+
+cd "$ROOT"
+dirty=false
+[[ -n "$(git status --porcelain)" ]] && dirty=true
+if ! $local_build && $dirty; then
+  die "the working tree has changes. Commit them, or use --local."
+fi
+
+version="$(tr -d '[:space:]' < VERSION)"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION holds '$version', not a version like 1.2.3."
+commit="$(git rev-parse --short=12 HEAD)"
+built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+say "Packaging Conduit $version ($commit$($dirty && echo ', uncommitted changes')), signing: $sign"
+
+# Build tools are loud on stderr even when they succeed. Keep each step's
+# output in a log and show its tail only when the step fails. Logs survive a
+# failure, so the path in the error message still exists.
+logdir="$(mktemp -d)"
+work=""
+packaged=false
+# shellcheck disable=SC2329 # run by the trap below
+cn_cleanup() {
+  [[ -n "$work" ]] && rm -rf "${work:?}"
+  $packaged && rm -rf "${logdir:?}"
+  return 0
+}
+trap cn_cleanup EXIT
+
+run_logged() {
+  local name="$1"; shift
+  local log="$logdir/$name.log"
+  if ! "$@" > "$log" 2>&1; then
+    tail -40 "$log" >&2
+    die "$name failed; full log: $log"
+  fi
+}
+
+# --- Build -----------------------------------------------------------------
+
+say "Building conduit-vpn"
+run_logged build-cli make -C tools/conduit-vpn build
+cli_product="tools/conduit-vpn/build/conduit-vpn"
+[[ -x "$cli_product" ]] || die "the CLI build produced nothing at $cli_product"
+
+say "Building Conduit.app (Release)"
+run_logged build-app make -C ConduitApp release
+app_product="ConduitApp/build/Build/Products/Release/Conduit.app"
+[[ -d "$app_product" ]] || die "the app build produced nothing at $app_product"
+
+# --- Stage -----------------------------------------------------------------
+
+work="$(mktemp -d)"
+stage="$work/conduit"
+mkdir -p "$stage/bin"
+
+cp "$cli_product" "$stage/bin/conduit-vpn"
+ditto "$app_product" "$stage/Conduit.app"
+
+plist="$stage/Conduit.app/Contents/Info.plist"
+pb() { /usr/libexec/PlistBuddy -c "$1" "$plist"; }
+stamp() { pb "$1" >/dev/null || die "could not stamp Info.plist ($1)"; }
+# What macOS remembers about the app is keyed to this identifier, so a product
+# built under another identifier is refused rather than shipped.
+bundle_id="$(pb 'Print :CFBundleIdentifier')" || die "Conduit.app has no CFBundleIdentifier"
+[[ "$bundle_id" == "$APP_ID" ]] || die "Conduit.app's bundle identifier is $bundle_id, not $APP_ID"
+stamp "Set :CFBundleShortVersionString $version"
+stamp "Add :ConduitBuildCommit string $commit"
+stamp "Add :ConduitBuildDirty bool $dirty"
+stamp "Add :ConduitBuiltAt string $built_at"
+
+# A release binary that loads a library from Homebrew or /usr/local starts
+# only on Macs that happen to have that library where this one does.
+libs="$(otool -L "$stage/bin/conduit-vpn")"
+[[ "$libs" != *"/opt/homebrew/"* && "$libs" != *"/usr/local/"* ]] \
+  || die "conduit-vpn links a library outside the system:"$'\n'"$libs"
+
+# Signed last: any change to either target after this breaks its signature.
+say "Signing Conduit.app and conduit-vpn ($sign)"
+# Not logged and not piped: op talks to the 1Password app on the user's
+# behalf, and signing may need to ask the user to approve it.
+"$ROOT/bin/lib/sign-app.sh" "$sign" "$stage/Conduit.app" "$BINARY_ID=$stage/bin/conduit-vpn" \
+  || die "signing failed"
+# Output is captured before matching throughout: under pipefail, `| grep -q`
+# exits on its match, the writer dies of SIGPIPE, and the pipeline fails.
+signer="ad-hoc"
+for target in "$stage/Conduit.app" "$stage/bin/conduit-vpn"; do
+  signature="$(codesign -dv --verbose=2 "$target" 2>&1)"
+  if [[ "$sign" == "op" ]]; then
+    [[ "$signature" == *$'\nAuthority='* ]] \
+      || die "signing $(basename "$target") with the release identity failed"
+    signer="${signature#*$'\n'Authority=}"; signer="${signer%%$'\n'*}"
+  fi
+  codesign --verify --strict "$target" || die "the signed $(basename "$target") does not verify"
+done
+[[ "$signature" == *$'\nIdentifier='"$BINARY_ID"$'\n'* ]] \
+  || die "conduit-vpn is not signed as $BINARY_ID"
+
+conduit_vpn_sha256="$(shasum -a 256 "$stage/bin/conduit-vpn" | cut -d' ' -f1)"
+printf '%s\n' "$version" > "$stage/VERSION"
+{
+  printf '{\n'
+  printf '  "version": "%s",\n' "$version"
+  printf '  "commit": "%s",\n' "$commit"
+  printf '  "dirty": %s,\n' "$dirty"
+  printf '  "built_at": "%s",\n' "$built_at"
+  printf '  "signing": "%s",\n' "$sign"
+  printf '  "signer": "%s",\n' "$signer"
+  printf '  "conduit_vpn_sha256": "%s"\n' "$conduit_vpn_sha256"
+  printf '}\n'
+} > "$stage/manifest.json"
+
+# --- Archive ---------------------------------------------------------------
+
+mkdir -p "$out"
+tar -czf "$out/$ASSET" -C "$work" conduit
+(cd "$out" && shasum -a 256 "$ASSET" > "$ASSET.sha256")
+
+packaged=true
+say "Wrote $out/$ASSET ($(du -h "$out/$ASSET" | cut -f1 | tr -d ' '))"
+echo "$out/$ASSET"

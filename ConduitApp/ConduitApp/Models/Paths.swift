@@ -46,6 +46,14 @@ enum ConduitPaths {
         root.appendingPathComponent("config.example.json")
     }
 
+    /// The installed CLI, which install.sh links onto ~/.local/bin.
+    static var installedCLI: URL { binDir.appendingPathComponent("conduit-vpn") }
+
+    /// The manifest of the archive install.sh last installed, written last.
+    static var installedManifest: URL {
+        root.appendingPathComponent("installed-manifest.json")
+    }
+
     /// Where the vendor's daemon writes its own log.
     ///
     /// Outside `root` because it is not Conduit's to arrange — the client owns

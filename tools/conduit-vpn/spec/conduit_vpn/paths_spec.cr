@@ -24,6 +24,10 @@ describe ConduitVPN::Paths do
           .should eq(Path.new("/somewhere/else/config.json"))
         ConduitVPN::Paths.example_config_file
           .should eq(Path.new("/somewhere/else/config.example.json"))
+        ConduitVPN::Paths.installed_cli
+          .should eq(Path.new("/somewhere/else/bin/conduit-vpn"))
+        ConduitVPN::Paths.installed_manifest
+          .should eq(Path.new("/somewhere/else/installed-manifest.json"))
       end
     end
   end

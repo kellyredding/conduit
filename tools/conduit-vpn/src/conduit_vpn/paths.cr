@@ -36,6 +36,16 @@ module ConduitVPN
       root / "config.example.json"
     end
 
+    # The installed CLI, which install.sh links onto ~/.local/bin.
+    def installed_cli : Path
+      bin_dir / "conduit-vpn"
+    end
+
+    # The manifest of the archive install.sh last installed, written last.
+    def installed_manifest : Path
+      root / "installed-manifest.json"
+    end
+
     # Where the vendor's daemon writes its own log.
     #
     # Outside `root` because it is not Conduit's to arrange — the client owns

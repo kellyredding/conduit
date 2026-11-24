@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# Releases the version in VERSION: checks, packages a signed archive of the
+# conduit-vpn CLI and Conduit.app, verifies it, then tags vX.Y.Z and publishes
+# a GitHub release marked latest with the archive and the notes in
+# release-notes/vX.Y.Z.md, which must already be on main.
+#
+# Usage: bin/release [--dry-run] [--fresh]
+#
+#   --dry-run   Do everything up to the tag, and stop. Nothing is pushed or
+#               published; the verified archive is left in dist/.
+#   --fresh     Rerun the checks and rebuild, even when dist/ already holds an
+#               archive checked and verified for this commit.
+#
+# A release right after a dry run of the same commit reuses that run's archive
+# instead of rerunning every check and rebuilding; it is verified again first.
+#
+# The disclosure audit always runs with the literal denylist: a release
+# refuses CONDUIT_ALLOW_NO_DENYLIST, and checks the notes and the release
+# description it publishes as well as the tracked files.
+#
+# Safe to run again. After a failure it finishes what the earlier run left
+# undone (the tag, its push, the GitHub release); once the release is
+# complete it says so and exits.
+#
+# Run it from a real terminal: signing reads the release identity from
+# 1Password, whose approval does not reach a shell without one.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="kellyredding/conduit"
+ASSET="conduit-darwin-arm64.tar.gz"
+IDENTITY="Conduit Release Signing"
+APP_ID="com.kellyredding.Conduit"
+BINARY_ID="com.kellyredding.conduit-vpn"
+
+dry_run=false
+fresh=false
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry_run=true ;;
+    --fresh) fresh=true ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "bin/release: unknown option '$arg'" >&2; exit 2 ;;
+  esac
+done
+
+say() { printf '==> %s\n' "$*"; }
+die() { printf 'bin/release: %s\n' "$*" >&2; exit 1; }
+
+# The audit fails closed without the literal denylist, so a pass here also
+# proves the denylist was found.
+cn_disclosure_check() {
+  local output
+  output="$("$ROOT/scripts/check-disclosure.sh" --file "$@" 2>&1)" \
+    || die "the disclosure audit refused $*:"$'\n'"$output"
+}
+
+cd "$ROOT"
+version="$(tr -d '[:space:]' < VERSION)"
+tag="v$version"
+release_notes="release-notes/$tag.md"
+
+# --- Everything that can refuse a release, before the slow parts -----------
+
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "VERSION holds '$version', not a version like 1.2.3."
+# symbolic-ref names the branch even before its first commit, where
+# rev-parse --abbrev-ref fails.
+branch="$(git symbolic-ref --short -q HEAD || echo "a detached HEAD")"
+[[ "$branch" == "main" ]] \
+  || die "releases are made from main (currently on $branch). Fast-forward main to development, then release."
+[[ -z "$(git status --porcelain)" ]] || die "the working tree has changes."
+git remote get-url origin >/dev/null 2>&1 || die "this checkout has no origin remote."
+git fetch -q origin main --tags || die "could not fetch main from origin."
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] \
+  || die "main is not origin/main. Pull, or push what is unpushed, and release again."
+[[ -s "$release_notes" ]] \
+  || die "$release_notes is missing. Write the notes with the version bump, and release once they are on main."
+[[ -z "${CONDUIT_ALLOW_NO_DENYLIST+set}" ]] \
+  || die "CONDUIT_ALLOW_NO_DENYLIST is set. A release is audited against the literal denylist; unset it."
+cn_disclosure_check "$release_notes"
+command -v gh >/dev/null || die "the GitHub CLI (gh) is not installed."
+gh auth status >/dev/null 2>&1 || die "gh is not signed in. Run: gh auth login"
+
+# --- What an earlier run of this version already did ------------------------
+
+head="$(git rev-parse HEAD)"
+tag_commit="$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)"
+if [[ -n "$tag_commit" && "$tag_commit" != "$head" ]]; then
+  die "$tag already exists at ${tag_commit:0:12}, not this commit (${head:0:12}). Bump VERSION first."
+fi
+tag_pushed=false
+if [[ -n "$tag_commit" ]] && git ls-remote --exit-code -q --tags origin "refs/tags/$tag" >/dev/null; then
+  tag_pushed=true
+fi
+
+# Complete means published with both files fully uploaded. Anything less, such
+# as the draft gh leaves when an upload fails, is finished rather than recreated.
+release_state=none
+if found="$(gh release view "$tag" --repo "$REPO" --json isDraft,assets \
+              --jq '"\(.isDraft) \([.assets[] | select(.state == "uploaded") | .name] | sort | join(" "))"' 2>&1)"; then
+  if [[ "$found" == "false $ASSET $ASSET.sha256" ]]; then
+    release_state=complete
+  else
+    release_state=partial
+  fi
+elif [[ "$found" != "release not found" ]]; then
+  die "could not look up the $tag release: $found"
+fi
+
+if [[ "$release_state" == complete && "$tag_commit" == "$head" ]]; then
+  say "Conduit $version is already released from ${head:0:12}: https://github.com/$REPO/releases/tag/$tag"
+  exit 0
+fi
+command -v op >/dev/null || die "the 1Password CLI (op) is not installed."
+
+say "Releasing Conduit $version"
+if [[ -n "$tag_commit" ]]; then
+  if $tag_pushed; then left="tagged and pushed"; else left="tagged, not pushed"; fi
+  if [[ "$release_state" != none ]]; then left="$left, with an incomplete GitHub release"; fi
+  say "Finishing an earlier run that left $tag $left"
+elif [[ "$release_state" != none ]]; then
+  say "Finishing an earlier run that left an incomplete $tag GitHub release"
+fi
+
+# --- Check and package, unless a dry run already did for this commit -------
+
+# Written only after a run's checks pass and its archive verifies, holding the
+# commit it was for. A new commit, a changed archive or --fresh means a full run.
+checked_stamp="$ROOT/dist/.checked-commit"
+reuse=false
+if ! $fresh && [[ -f "$checked_stamp" && -f "$ROOT/dist/$ASSET" && -f "$ROOT/dist/$ASSET.sha256" ]] \
+   && [[ "$(cat "$checked_stamp")" == "$head" ]]; then
+  reuse=true
+fi
+
+if $reuse; then
+  say "Reusing the archive a dry run checked and built for ${head:0:12} (--fresh to redo)"
+else
+  say "Running every check (make check, make app-check)"
+  # Passing checks print a great deal to stderr (expected spec errors, Xcode's
+  # warnings), so their output is kept in a log shown only on failure.
+  check_log="$(mktemp -t conduit-release-checks)"
+  if ! { make check && make app-check; } > "$check_log" 2>&1; then
+    tail -40 "$check_log" >&2
+    die "a check failed; full log: $check_log"
+  fi
+  rm -f "${check_log:?}"
+  # make check formats the CLI's sources, so it can write into the tree; name
+  # the files here rather than leave packaging's refusal to explain itself.
+  [[ -z "$(git status --porcelain)" ]] \
+    || die "the checks modified the working tree:"$'\n'"$(git status --short)"
+
+  say "Packaging"
+  rm -rf "${ROOT:?}/dist"
+  "$ROOT/bin/package" --sign op --out "$ROOT/dist"
+fi
+
+# --- Verify, always: a reused archive is checked as hard as a new one -------
+
+say "Verifying the archive"
+verify="$(mktemp -d)"
+trap 'rm -rf "${verify:?}"' EXIT
+(cd "$ROOT/dist" && shasum -a 256 -c "$ASSET.sha256" >/dev/null) || die "checksum does not match"
+tar -xzf "$ROOT/dist/$ASSET" -C "$verify"
+pkg="$verify/conduit"
+[[ -f "$pkg/manifest.json" && -x "$pkg/bin/conduit-vpn" && -d "$pkg/Conduit.app" && -f "$pkg/VERSION" ]] \
+  || die "the archive is missing manifest.json, bin/conduit-vpn, Conduit.app or VERSION"
+manifest="$(cat "$pkg/manifest.json")"
+[[ "$manifest" == *"\"version\": \"$version\""* ]] || die "manifest is not version $version"
+[[ "$manifest" == *'"dirty": false'* ]] || die "the archive was built from a dirty tree"
+[[ "$manifest" == *"\"commit\": \"${head:0:12}\""* ]] \
+  || die "the archive was not built from ${head:0:12}; run with --fresh"
+[[ "$manifest" == *"\"signer\": \"$IDENTITY\""* ]] || die "manifest does not name $IDENTITY as the signer"
+# The last word, so "conduit-vpn 1.2.3" and a bare "1.2.3" both read as 1.2.3.
+have="$("$pkg/bin/conduit-vpn" --version </dev/null)" || die "bin/conduit-vpn --version failed"
+[[ "${have##* }" == "$version" ]] || die "conduit-vpn reports '$have', not $version"
+libs="$(otool -L "$pkg/bin/conduit-vpn")"
+[[ "$libs" != *"/opt/homebrew/"* && "$libs" != *"/usr/local/"* ]] \
+  || die "conduit-vpn links a library outside the system:"$'\n'"$libs"
+app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$pkg/Conduit.app/Contents/Info.plist")"
+[[ "$app_version" == "$version" ]] || die "Conduit.app says it is $app_version, not $version"
+for target in "$pkg/Conduit.app=$APP_ID" "$pkg/bin/conduit-vpn=$BINARY_ID"; do
+  path="${target%=*}"; id="${target##*=}"; name="$(basename "$path")"
+  codesign --verify --strict "$path" || die "$name does not verify"
+  # Captured before matching: under pipefail, `| grep -q` exits on its match,
+  # codesign dies of SIGPIPE writing the lines after it, and the check fails.
+  signature="$(codesign -dv --verbose=2 "$path" 2>&1)"
+  [[ "$signature" == *$'\n'"Authority=$IDENTITY"$'\n'* ]] || die "$name is not signed by $IDENTITY"
+  [[ "$signature" == *$'\n'"Identifier=$id"$'\n'* ]] || die "$name is not signed as $id"
+done
+echo "    archive verified: conduit-vpn $version and Conduit.app, both signed by $IDENTITY"
+printf '%s\n' "$head" > "$checked_stamp"
+
+# --- Release description ---------------------------------------------------
+
+# The summary is written by hand (with an agent's draft) in the version-bump
+# commit, so it is reviewed before it is published; this only adds install steps.
+notes="$verify/notes.md"
+{
+  echo "Install:"
+  echo
+  echo '```bash'
+  echo "curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
+  echo '```'
+  echo
+  echo "Update an existing install with \`conduit-vpn update\`."
+  echo
+  echo "Apple Silicon, macOS 26 or later, with the AWS VPN Client 6.0 or later."
+  echo "Download with the script, not a browser: the app is self-signed, and macOS"
+  echo "blocks a browser download of it."
+  echo
+  echo "## What's new"
+  echo
+  cat "$release_notes"
+} > "$notes"
+cn_disclosure_check "$notes"
+echo "    release description passed the disclosure audit"
+
+if $dry_run; then
+  say "Dry run: stopping before the tag. Archive: $ROOT/dist/$ASSET"
+  say "The release description would be:"
+  echo
+  cat "$notes"
+  exit 0
+fi
+
+# --- Tag and publish -------------------------------------------------------
+
+if [[ -z "$tag_commit" ]]; then
+  say "Tagging $tag"
+  git tag -a "$tag" -m "Conduit $version"
+fi
+if ! $tag_pushed; then
+  say "Pushing $tag"
+  git push -q origin "$tag"
+fi
+
+# Marked latest explicitly, both ways: install.sh installs whatever is latest.
+if [[ "$release_state" == none ]]; then
+  say "Publishing the GitHub release"
+  gh release create "$tag" --repo "$REPO" --title "Conduit $version" --notes-file "$notes" --latest \
+    "$ROOT/dist/$ASSET" "$ROOT/dist/$ASSET.sha256"
+else
+  say "Finishing the GitHub release"
+  gh release upload "$tag" --repo "$REPO" --clobber "$ROOT/dist/$ASSET" "$ROOT/dist/$ASSET.sha256"
+  gh release edit "$tag" --repo "$REPO" --title "Conduit $version" --notes-file "$notes" --draft=false --latest
+fi
+
+say "Released $tag: https://github.com/$REPO/releases/tag/$tag"
