@@ -18,7 +18,8 @@ involved.
 |---|---|
 | `status` | Every profile and its connection state, one line each. `--json` for machine output |
 | `config` | Read and write settings. `get`, `set`, `unset`, `describe`, `example` |
-| `doctor` | Whether this machine is set up correctly. `--explain` describes the addressing failure |
+| `doctor` | Whether this machine is set up correctly, and whether the install matches its record. `--explain` describes the addressing failure |
+| `update` | Install the latest release of the CLI and the app. `--version X.Y.Z`, `--local [PATH]` for a checkout, `--preview`, `--force` |
 | `version` | The `conduit-vpn` version |
 
 **Client commands Conduit adds to.** Every flag the client accepts still works,
@@ -121,6 +122,8 @@ does not take effect is otherwise a long hunt.
 - `~/.conduit/bin/conduit-vpn` — installed binary, symlinked onto `~/.local/bin`
 - `~/.conduit/config.json` — settings, shared with the app. Created on first change
 - `~/.conduit/config.example.json` — written at install, never read back
+- `~/.conduit/installed-manifest.json` — what `install.sh` last installed;
+  `doctor` checks the app and the CLI against it
 - `~/.conduit/client-home` — the `HOME` handed to the vendor client; only its logs
   live there, and it must be reachable without traversing a symlink
 
@@ -128,8 +131,12 @@ does not take effect is otherwise a long hunt.
 
 ```bash
 make check    # format, build dev binary, run specs, lint
-make install  # release binary + ~/.local/bin symlink
+make install  # unsigned release binary + ~/.local/bin symlink, CLI only
 ```
+
+`make install` is for iterating on the CLI alone. `conduit-vpn update --local`
+from the repository installs the CLI and the app together, signed, and records
+the install for `doctor`.
 
 Specs are split: `spec/conduit_vpn/` exercises modules directly, and
 `spec/integration/` runs the compiled binary against a fake `aws-vpn-client` on

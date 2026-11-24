@@ -96,15 +96,36 @@ destroyed by other tools and are often already live at launch, so state is
 reconciled against the client continuously rather than inferred from what
 Conduit asked for.
 
-## Setup
+## Install
+
+Apple Silicon, macOS 26 or later, with the AWS VPN Client 6.0 or later:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kellyredding/conduit/main/install.sh | bash
+```
+
+That installs the latest release: `conduit-vpn` in `~/.conduit/bin`, linked
+onto `~/.local/bin`, and a signed `Conduit.app` in `~/Applications`. Use the
+script rather than a browser download: the app is self-signed, and macOS blocks
+a browser download of it. Then `conduit-vpn doctor` reports the install,
+including the release it came from.
+
+## Update
+
+```bash
+conduit-vpn update                   # the latest release
+conduit-vpn update --version 0.1.0   # a particular release
+conduit-vpn update --preview         # what would change, changing nothing
+```
+
+An update replaces `~/.conduit/bin/conduit-vpn` and `~/Applications/Conduit.app`
+and leaves your settings alone. It never restarts the app: a running Conduit
+keeps the old build until you quit and reopen it.
+
+## Building from source
 
 See [SETUP.md](SETUP.md) — prerequisites, building the CLI and the app, the
 disclosure audit, and troubleshooting.
-
-```bash
-make cli-install      # build + install ~/.local/bin/conduit-vpn
-conduit-vpn doctor    # verify the install
-```
 
 ## Configuration
 
@@ -137,6 +158,15 @@ make build                 # CLI + app
 
 `make check` does **not** cover the app, and `make app-check` does not cover the
 CLI — a change touching both needs both commands.
+
+`conduit-vpn update --local [PATH]` installs a checkout, uncommitted changes
+included: it runs the checkout's `bin/package --local`, then its
+`install.sh --from` on the archive. Packaging signs with the release identity
+from 1Password, and `install.sh` refuses anything signed otherwise, so an
+ad-hoc build never replaces an installed Conduit.
+
+Releases are built and published from a Mac with `bin/release`; see
+[`release-notes/`](release-notes/README.md).
 
 This repository is public and must never describe anyone's particular VPN.
 `make audit` enforces that and runs as part of `make check`; it scans

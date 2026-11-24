@@ -36,6 +36,23 @@ On a fresh clone the denylist is absent and the audit refuses rather than
 covering less than it claims. `SETUP.md` documents
 `CONDUIT_ALLOW_NO_DENYLIST=1` for that case.
 
+## Branches and releases
+
+- Work lands on `development`. Feature branches
+  (`kr/conduit-<feature>NN-<task>`) come off it, and `development`
+  fast-forwards to them (`git merge --ff-only`), rebasing first if it moved.
+- `main` is the release branch and only ever fast-forwards to
+  `development`. Never commit on `main`, not even a version bump.
+- **No pull requests and no review loop** in this repository. That is a
+  deliberate exception to the general git workflow; do not open PRs here.
+- Kelly releases with `bin/release`. **Agents never tag, publish or push a
+  release.** Release notes are public too: the audit covers them.
+- The version lives only in `VERSION`. The CLI reads it at compile time and
+  `bin/package` stamps it into the app; never type a version anywhere else.
+- The installed app is a signed copy at `~/Applications/Conduit.app`, put
+  there by `install.sh`; `conduit-vpn update --local` installs a checkout.
+  Never sign ad hoc for anything installed.
+
 ## Building
 
 ```bash

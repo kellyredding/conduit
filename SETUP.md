@@ -1,8 +1,15 @@
 # Setup
 
-Building Conduit from source: the `conduit-vpn` command line, the menu-bar app,
-or both. They are independent — the CLI is useful on its own, and the app needs
-nothing from it at runtime.
+To use Conduit, install a release (Apple Silicon, macOS 26 or later):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kellyredding/conduit/main/install.sh | bash
+conduit-vpn update    # later, to update both the CLI and the app
+```
+
+The rest of this file is building Conduit from source: the `conduit-vpn` command
+line, the menu-bar app, or both. They are independent — the CLI is useful on
+its own, and the app needs nothing from it at runtime.
 
 ## Prerequisites
 
@@ -35,15 +42,26 @@ make cli-install
 - `~/.local/bin/conduit-vpn` — a symlink to it, for `PATH`
 - `~/.conduit/config.example.json` — every setting documented; never read back
 
-Make sure `~/.local/bin` is on your `PATH`.
+Make sure `~/.local/bin` is on your `PATH`. This binary is unsigned and replaces
+any installed release's, so `conduit-vpn doctor` reports it as not the recorded
+build until the next `conduit-vpn update`.
 
 ## 2. Build the app
 
 ```bash
 make app-build     # or: make app-check, to build and run the smoke checks
-make app-install   # symlink into ~/Applications and register with Launch Services
-open ~/Applications/Conduit.app
+open ConduitApp/build/Build/Products/Debug/Conduit.app
 ```
+
+A development build runs from its build folder and is never installed. Each
+build unregisters its product from Launch Services, so Spotlight and
+`open -a Conduit` keep finding the installed copy in `~/Applications`.
+
+Installing a checkout, `conduit-vpn update --local`, packages it with
+`bin/package` and installs it with `install.sh --from`. Packaging signs with the
+"Conduit Release Signing" identity, which only the maintainer holds, and
+`install.sh` installs nothing signed otherwise; `bin/package --local --sign adhoc`
+checks that packaging works, and its archive cannot be installed.
 
 `ConduitApp/project.yml` is the source of truth for the Xcode project.
 `xcodegen` regenerates it on every build and the `.xcodeproj` is not tracked, so
@@ -178,8 +196,10 @@ target against fixtures.
 
 ### The app does not appear in Spotlight or `open -a Conduit`
 
-`make app-install` creates the `~/Applications` symlink and re-registers it. If
-several copies have accumulated, list what Launch Services knows:
+`install.sh` registers `~/Applications/Conduit.app` and unregisters copies in
+Xcode build folders, and `conduit-vpn doctor` lists any other registered copy.
+`conduit-vpn update --force` reinstalls and re-registers. To list what Launch
+Services knows:
 
 ```bash
 /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -dump | grep -i "path.*Conduit.app"
