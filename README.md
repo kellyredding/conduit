@@ -1,4 +1,7 @@
-# Conduit
+<h1 align="center">
+  <img src="ConduitApp/ConduitApp/Assets.xcassets/AppIcon.appiconset/icon_256.png" width="128" height="128" alt=""><br>
+  Conduit
+</h1>
 
 A macOS menu-bar client for AWS Client VPN, plus a companion CLI.
 
